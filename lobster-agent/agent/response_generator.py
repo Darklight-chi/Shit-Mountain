@@ -1,14 +1,18 @@
-"""Generate final reply using an OpenAI-compatible LLM."""
+"""Generate final reply using an OpenAI-compatible LLM (OpenClaw / Ollama / OpenAI)."""
 
+import random
 from openai import OpenAI
 from loguru import logger
 
-from config.prompts import RESPONSE_GENERATION_PROMPT, SYSTEM_PROMPTS
-from config.settings import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
+from config.prompts import RESPONSE_GENERATION_PROMPT, SYSTEM_PROMPTS, XIANYU_GREETINGS_ZH
+from config.settings import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENCLAW_AGENT_ID
 
 
 def get_llm_client() -> OpenAI:
-    return OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
+    extra = {}
+    if OPENCLAW_AGENT_ID:
+        extra["default_headers"] = {"x-openclaw-agent-id": OPENCLAW_AGENT_ID}
+    return OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL, **extra)
 
 
 def generate_reply(
@@ -23,15 +27,16 @@ def generate_reply(
     """Generate a polished customer service reply via LLM."""
     if intent == "general_greeting":
         if locale == "zh":
-            return "您好，我是小龙虾客服助手，请问有什么可以帮您？"
-        return "Hello! I'm Lobster, your customer service assistant. How can I help you?"
+            return random.choice(XIANYU_GREETINGS_ZH)
+        return "Hi there! What can I help you with?"
 
     if tool_results and risk_level == "low" and intent != "fallback":
         return tool_results
 
     history_text = "\n".join(f"{m['role']}: {m['content']}" for m in history[-5:]) if history else "无"
     channel_context_text = _format_channel_context(channel_context or {})
-    language = "Chinese" if locale == "zh" else "English"
+    lang_map = {"zh": "Chinese", "en": "English", "ru": "Russian"}
+    language = lang_map.get(locale, "Chinese")
     user_prompt = RESPONSE_GENERATION_PROMPT.format(
         locale=locale,
         intent=intent,
@@ -70,10 +75,22 @@ def _format_channel_context(channel_context: dict) -> str:
     if not channel_context:
         return "无"
 
-    ordered_keys = ["conversation_title", "conversation_preview", "session_id", "channel"]
     parts = []
-    for key in ordered_keys:
+    for key in ("conversation_title", "conversation_preview", "session_id", "channel"):
         value = channel_context.get(key)
         if value:
             parts.append(f"{key}={value}")
+
+    # Include scraped order/product card info
+    order_cards = channel_context.get("order_cards", [])
+    if order_cards:
+        for card in order_cards[-3:]:
+            card_desc = card.get("title", "")
+            if card.get("price"):
+                card_desc += f" ({card['price']}元)"
+            if card.get("status"):
+                card_desc += f" [{card['status']}]"
+            if card_desc:
+                parts.append(f"商品卡片: {card_desc}")
+
     return ", ".join(parts) if parts else "无"

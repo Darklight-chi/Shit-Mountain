@@ -12,7 +12,8 @@ from tools.translation_tool import detect_language
 
 
 def test_faq():
-    assert "发货" in faq_lookup("多久发货", "zh")
+    result = faq_lookup("多久发货", "zh")
+    assert result is not None and "发货" in result
     assert faq_lookup("shipping", "en") is not None
     assert faq_lookup("随便说点什么", "zh") is None
 

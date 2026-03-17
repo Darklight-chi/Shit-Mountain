@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from loguru import logger
 from config.settings import LOG_LEVEL
 from database.db import init_db
-from app.runner import run_xianyu_loop, run_cli_demo
+from app.runner import run_xianyu_loop, run_ozon_loop, run_cli_demo
 
 
 def setup_logging():
@@ -29,12 +29,15 @@ def main():
     if mode == "xianyu":
         logger.info("Starting Xianyu live mode...")
         asyncio.run(run_xianyu_loop())
+    elif mode == "ozon":
+        logger.info("Starting Ozon live mode...")
+        asyncio.run(run_ozon_loop())
     elif mode == "cli":
         logger.info("Starting CLI demo mode...")
         run_cli_demo()
     else:
         print(f"Unknown mode: {mode}")
-        print("Usage: python -m app.main [cli|xianyu]")
+        print("Usage: python -m app.main [cli|xianyu|ozon]")
 
 
 if __name__ == "__main__":

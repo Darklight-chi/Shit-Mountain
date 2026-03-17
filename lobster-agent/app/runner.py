@@ -1,6 +1,7 @@
-"""Runner: Xianyu live loop and CLI demo."""
+"""Runner: Xianyu / Ozon live loop and CLI demo."""
 
 import asyncio
+import random
 from loguru import logger
 from adapters.xianyu_adapter import XianyuAdapter
 from conversation.message_router import MessageRouter
@@ -32,10 +33,15 @@ async def run_xianyu_loop():
                 reply = result["reply"]
                 locale = result["locale"]
 
+                # Random delay before reply to feel more human
+                await asyncio.sleep(random.uniform(1.0, 3.0))
+
                 sent = await adapter.send_reply(msg.session_id, reply)
                 if sent:
                     router.save_reply(msg, reply, locale)
                     logger.info(f"[{msg.channel}] Bot: {reply}")
+                else:
+                    logger.warning(f"[{msg.channel}] Failed to send reply to {msg.session_id}")
 
                 # Update session state
                 router.session_mgr.update_session(
@@ -45,7 +51,9 @@ async def run_xianyu_loop():
                     needs_handoff=result["needs_handoff"],
                 )
 
-            await asyncio.sleep(XIANYU_POLL_INTERVAL)
+            # Randomize poll interval slightly to avoid detection
+            jitter = random.uniform(-1.0, 2.0)
+            await asyncio.sleep(max(2, XIANYU_POLL_INTERVAL + jitter))
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     finally:
@@ -56,7 +64,7 @@ def run_cli_demo():
     """Interactive CLI for testing the agent without Xianyu."""
     from adapters.base import IncomingMessage
 
-    print("\n🦞 Lobster Agent CLI Demo")
+    print("\nLobster Agent CLI Demo")
     print("=" * 40)
     print("Type a message to test. Type 'quit' to exit.\n")
 
@@ -65,7 +73,7 @@ def run_cli_demo():
 
     while True:
         try:
-            user_input = input("👤 You: ").strip()
+            user_input = input("You: ").strip()
         except (EOFError, KeyboardInterrupt):
             break
 
@@ -100,4 +108,49 @@ def run_cli_demo():
             needs_handoff=result["needs_handoff"],
         )
 
-        print(f"🦞 Lobster [{intent}|{risk}]: {reply}\n")
+        print(f"Lobster [{intent}|{risk}]: {reply}\n")
+
+
+async def run_ozon_loop():
+    """Live loop: poll Ozon Seller API for messages, process, reply."""
+    from adapters.ozon_adapter import OzonAdapter
+
+    adapter = OzonAdapter()
+    await adapter.setup()
+    logger.info("Ozon adapter ready. Listening for messages...")
+
+    ozon_router = MessageRouter()
+    poll_interval = 10  # Ozon API rate limits are more lenient
+
+    try:
+        while True:
+            messages = await adapter.fetch_new_messages()
+            for msg in messages:
+                if not ozon_router.should_process(msg):
+                    continue
+
+                logger.info(f"[{msg.channel}] Buyer: {msg.content}")
+                context = ozon_router.prepare_context(msg)
+                context["channel_context"] = await adapter.get_session_context(msg.session_id)
+                result = run_agent(context)
+
+                reply = result["reply"]
+                locale = result["locale"]
+
+                sent = await adapter.send_reply(msg.session_id, reply)
+                if sent:
+                    ozon_router.save_reply(msg, reply, locale)
+                    logger.info(f"[{msg.channel}] Bot: {reply}")
+
+                ozon_router.session_mgr.update_session(
+                    msg.session_id,
+                    last_intent=result["intent"],
+                    last_risk_level=result["risk_level"],
+                    needs_handoff=result["needs_handoff"],
+                )
+
+            await asyncio.sleep(poll_interval)
+    except KeyboardInterrupt:
+        logger.info("Shutting down Ozon loop...")
+    finally:
+        await adapter.teardown()
