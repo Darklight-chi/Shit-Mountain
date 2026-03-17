@@ -26,6 +26,7 @@ async def run_xianyu_loop():
 
                 logger.info(f"[{msg.channel}] User: {msg.content}")
                 context = router.prepare_context(msg)
+                context["channel_context"] = await adapter.get_session_context(msg.session_id)
                 result = run_agent(context)
 
                 reply = result["reply"]

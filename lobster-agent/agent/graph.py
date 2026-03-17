@@ -26,6 +26,7 @@ def run_agent(context: dict) -> dict:
     history = context.get("history", [])
     user_id = context.get("user_id", "demo_user")
     session = context.get("session", {})
+    channel_context = context.get("channel_context", {})
     conv_id = session.get("id", 0)
 
     # Step 1: Detect language
@@ -63,6 +64,7 @@ def run_agent(context: dict) -> dict:
     reply = generate_reply(
         message=message, intent=intent, risk_level=risk_level,
         tool_results=tool_results, history=history, locale=locale,
+        channel_context=channel_context,
     )
 
     return {

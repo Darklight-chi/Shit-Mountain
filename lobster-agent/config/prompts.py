@@ -54,6 +54,7 @@ Locale: {locale}
 Intent: {intent}
 Risk level: {risk_level}
 Tool results: {tool_results}
+Channel context: {channel_context}
 Conversation history: {history}
 User message: {message}
 
