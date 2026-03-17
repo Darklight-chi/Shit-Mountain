@@ -2,6 +2,8 @@
 
 import asyncio
 import random
+import time
+from dataclasses import dataclass, field
 
 from loguru import logger
 
@@ -18,6 +20,39 @@ from config.settings import (
     XIANYU_POLL_INTERVAL,
 )
 from conversation.message_router import MessageRouter
+
+
+MAX_POLL_BACKOFF_SECONDS = 60
+HEARTBEAT_INTERVAL_SECONDS = 60
+
+
+@dataclass
+class LoopRuntimeStats:
+    mode: str
+    started_at: float = field(default_factory=time.time)
+    polls: int = 0
+    messages_in: int = 0
+    replies_sent: int = 0
+    handoffs: int = 0
+    duplicates: int = 0
+    send_failures: int = 0
+    process_failures: int = 0
+    poll_failures: int = 0
+    last_heartbeat_at: float = 0.0
+
+    def heartbeat_due(self) -> bool:
+        return time.time() - self.last_heartbeat_at >= HEARTBEAT_INTERVAL_SECONDS
+
+    def log_heartbeat(self):
+        uptime = int(time.time() - self.started_at)
+        logger.info(
+            f"[{self.mode}] heartbeat | uptime={uptime}s polls={self.polls} "
+            f"messages_in={self.messages_in} replies_sent={self.replies_sent} "
+            f"handoffs={self.handoffs} duplicates={self.duplicates} "
+            f"send_failures={self.send_failures} process_failures={self.process_failures} "
+            f"poll_failures={self.poll_failures}"
+        )
+        self.last_heartbeat_at = time.time()
 
 
 MODE_CONFIG: dict[str, dict] = {
@@ -49,9 +84,12 @@ async def process_incoming_message(
     router: MessageRouter,
     adapter: BaseChannelAdapter | None = None,
     reply_delay: tuple[float, float] | None = None,
+    stats: LoopRuntimeStats | None = None,
 ) -> dict | None:
     """Run the full pipeline for a single inbound message."""
     if not router.should_process(msg):
+        if stats:
+            stats.duplicates += 1
         return None
 
     logger.info(f"[{msg.channel}] User: {msg.content}")
@@ -62,24 +100,33 @@ async def process_incoming_message(
     result = run_agent(context)
     reply = result["reply"]
     locale = result["locale"]
+    status = "escalated" if result["needs_handoff"] else "active"
 
     if adapter:
         if reply_delay:
             await asyncio.sleep(random.uniform(*reply_delay))
         sent = await adapter.send_reply(msg.session_id, reply)
         if not sent:
+            if stats:
+                stats.send_failures += 1
             logger.warning(f"[{msg.channel}] Failed to send reply to {msg.session_id}")
             return None
 
     router.save_reply(msg, reply, locale)
     router.session_mgr.update_session(
         msg.session_id,
+        status=status,
         last_intent=result["intent"],
         last_risk_level=result["risk_level"],
         needs_handoff=result["needs_handoff"],
         summary=result.get("summary"),
     )
     logger.info(f"[{msg.channel}] Bot: {reply}")
+
+    if stats:
+        stats.replies_sent += 1
+        if result["needs_handoff"]:
+            stats.handoffs += 1
     return result
 
 
@@ -90,20 +137,48 @@ async def run_live_loop(mode: str):
     router = MessageRouter()
     poll_interval = config["poll_interval"]
     reply_delay = config["reply_delay"]
+    stats = LoopRuntimeStats(mode=mode)
+    consecutive_poll_failures = 0
 
     await adapter.setup()
     logger.info(f"{mode} adapter ready. Listening for messages...")
 
     try:
         while True:
-            messages = await adapter.fetch_new_messages()
-            for msg in messages:
-                await process_incoming_message(
-                    msg,
-                    router=router,
-                    adapter=adapter,
-                    reply_delay=reply_delay,
+            try:
+                stats.polls += 1
+                messages = await adapter.fetch_new_messages()
+                consecutive_poll_failures = 0
+            except Exception as exc:
+                stats.poll_failures += 1
+                consecutive_poll_failures += 1
+                backoff_seconds = min(
+                    poll_interval * max(2, consecutive_poll_failures),
+                    MAX_POLL_BACKOFF_SECONDS,
                 )
+                logger.exception(
+                    f"[{mode}] poll failed #{consecutive_poll_failures}, "
+                    f"retrying in {backoff_seconds}s: {exc}"
+                )
+                await asyncio.sleep(backoff_seconds)
+                continue
+
+            stats.messages_in += len(messages)
+            for msg in messages:
+                try:
+                    await process_incoming_message(
+                        msg,
+                        router=router,
+                        adapter=adapter,
+                        reply_delay=reply_delay,
+                        stats=stats,
+                    )
+                except Exception as exc:
+                    stats.process_failures += 1
+                    logger.exception(f"[{mode}] failed processing message {msg.session_id}: {exc}")
+
+            if stats.heartbeat_due():
+                stats.log_heartbeat()
 
             sleep_for = poll_interval
             if mode == "xianyu":

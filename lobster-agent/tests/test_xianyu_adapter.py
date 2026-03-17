@@ -54,6 +54,24 @@ def test_select_new_incoming_payloads_skips_seen_message():
     assert adapter._select_new_incoming_payloads("session-a", [payload]) == []
 
 
+def test_mark_payloads_seen_primes_existing_backlog():
+    if not HAS_PLAYWRIGHT:
+        print("  SKIP (playwright not installed)")
+        return
+    adapter = XianyuAdapter()
+    old_payloads = [
+        {"message_id": "old-1", "text": "老消息1", "outgoing": False},
+        {"message_id": "old-2", "text": "老消息2", "outgoing": False},
+    ]
+    assert adapter._mark_payloads_seen("session-a", old_payloads) == 2
+
+    later_payloads = old_payloads + [
+        {"message_id": "new-1", "text": "新消息", "outgoing": False},
+    ]
+    selected = adapter._select_new_incoming_payloads("session-a", later_payloads)
+    assert [item["message_id"] for item in selected] == ["new-1"]
+
+
 def test_match_conversation_falls_back_to_cached_title():
     if not HAS_PLAYWRIGHT:
         print("  SKIP (playwright not installed)")

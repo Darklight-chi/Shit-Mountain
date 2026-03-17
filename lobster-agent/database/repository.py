@@ -70,6 +70,51 @@ class ConversationRepo:
         finally:
             s.close()
 
+    def get_by_session_id(self, session_id: str) -> Optional[dict]:
+        s = get_session()
+        try:
+            conv = s.query(Conversation).filter(
+                Conversation.session_id == session_id).first()
+            if not conv:
+                return None
+            return {
+                "id": conv.id,
+                "channel": conv.channel,
+                "session_id": conv.session_id,
+                "user_id": conv.user_id,
+                "status": conv.status,
+                "last_intent": conv.last_intent,
+                "last_risk_level": conv.last_risk_level,
+                "needs_handoff": conv.needs_handoff,
+                "summary": conv.summary,
+            }
+        finally:
+            s.close()
+
+    def list_by_status(self, status: str) -> list[dict]:
+        s = get_session()
+        try:
+            rows = (s.query(Conversation)
+                    .filter(Conversation.status == status)
+                    .order_by(Conversation.updated_at.desc())
+                    .all())
+            return [
+                {
+                    "id": row.id,
+                    "channel": row.channel,
+                    "session_id": row.session_id,
+                    "user_id": row.user_id,
+                    "status": row.status,
+                    "last_intent": row.last_intent,
+                    "last_risk_level": row.last_risk_level,
+                    "needs_handoff": row.needs_handoff,
+                    "summary": row.summary,
+                }
+                for row in rows
+            ]
+        finally:
+            s.close()
+
 
 class TicketRepo:
     def create(self, conversation_id: int, reason: str,
@@ -81,6 +126,41 @@ class TicketRepo:
             s.add(t)
             s.commit()
             return t.id
+        finally:
+            s.close()
+
+    def get_latest_by_conversation(self, conversation_id: int) -> Optional[dict]:
+        s = get_session()
+        try:
+            ticket = (s.query(Ticket)
+                      .filter(Ticket.conversation_id == conversation_id)
+                      .order_by(Ticket.created_at.desc())
+                      .first())
+            if not ticket:
+                return None
+            return {
+                "id": ticket.id,
+                "conversation_id": ticket.conversation_id,
+                "reason": ticket.reason,
+                "summary": ticket.summary,
+                "priority": ticket.priority,
+                "status": ticket.status,
+                "created_at": ticket.created_at,
+            }
+        finally:
+            s.close()
+
+    def update_status(self, ticket_id: int, status: str, summary: str | None = None):
+        s = get_session()
+        try:
+            ticket = s.query(Ticket).filter(Ticket.id == ticket_id).first()
+            if not ticket:
+                return False
+            ticket.status = status
+            if summary:
+                ticket.summary = summary
+            s.commit()
+            return True
         finally:
             s.close()
 

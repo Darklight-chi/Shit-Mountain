@@ -24,3 +24,21 @@ class SessionManager:
 
     def mark_escalated(self, session_id: str):
         conv_repo.update(session_id, status="escalated", needs_handoff=True)
+
+    def get_session(self, session_id: str) -> dict | None:
+        return conv_repo.get_by_session_id(session_id)
+
+    def list_escalated_sessions(self) -> list[dict]:
+        return conv_repo.list_by_status("escalated")
+
+    def mark_handoff_in_progress(self, session_id: str, summary: str | None = None):
+        payload = {"status": "escalated", "needs_handoff": True}
+        if summary:
+            payload["summary"] = summary
+        conv_repo.update(session_id, **payload)
+
+    def resolve_handoff(self, session_id: str, summary: str | None = None):
+        payload = {"status": "resolved", "needs_handoff": False}
+        if summary:
+            payload["summary"] = summary
+        conv_repo.update(session_id, **payload)

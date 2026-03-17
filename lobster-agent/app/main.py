@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from loguru import logger
 
+from app.handoff_cli import run_handoff_cli
 from app.runner import (
     run_chatwoot_loop,
     run_cli_demo,
@@ -41,6 +42,10 @@ def main():
 
     mode = sys.argv[1] if len(sys.argv) > 1 else "cli"
 
+    if mode == "handoff":
+        run_handoff_cli(sys.argv[2:])
+        return
+
     if mode == "cli":
         logger.info("Starting CLI demo mode...")
         run_cli_demo()
@@ -52,7 +57,7 @@ def main():
         return
 
     print(f"Unknown mode: {mode}")
-    print("Usage: python -m app.main [cli|xianyu|ozon|shopify|chatwoot]")
+    print("Usage: python -m app.main [cli|xianyu|ozon|shopify|chatwoot|handoff]")
 
 
 if __name__ == "__main__":

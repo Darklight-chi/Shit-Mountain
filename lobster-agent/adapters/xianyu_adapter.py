@@ -317,6 +317,7 @@ class XianyuAdapter(BaseChannelAdapter):
         self._page: Optional[Page] = None
         self._pw = None
         self._seen_ids: set[str] = set()
+        self._baseline_initialized: bool = False
         self._conversation_cache: dict[str, dict[str, Any]] = {}
         self._last_activity: float = 0.0
         self._consecutive_errors: int = 0
@@ -424,6 +425,15 @@ class XianyuAdapter(BaseChannelAdapter):
             conversations = await self._read_conversation_summaries()
             targets = [c for c in conversations if c.get("unread")] or conversations[:1]
 
+            if not self._baseline_initialized:
+                primed = await self._prime_existing_unread_messages(targets[:5])
+                self._baseline_initialized = True
+                self._consecutive_errors = 0
+                self._last_activity = time.time()
+                if primed:
+                    logger.info(f"Xianyu baseline initialized, skipped {primed} existing unread messages.")
+                return []
+
             for summary in targets[:5]:
                 if not await self._open_conversation(summary):
                     continue
@@ -460,6 +470,21 @@ class XianyuAdapter(BaseChannelAdapter):
                 await self._recover()
 
         return messages
+
+    async def _prime_existing_unread_messages(self, targets: list[dict[str, Any]]) -> int:
+        """On first poll, record current unread backlog as seen to avoid replying to stale messages."""
+        primed_count = 0
+        for summary in targets:
+            if not await self._open_conversation(summary):
+                continue
+
+            await self._human_delay(0.2, 0.4)
+            session_id = await self._get_current_session_id(summary)
+            summary["session_id"] = session_id
+            self._conversation_cache[session_id] = summary
+            payloads = await self._read_current_messages()
+            primed_count += self._mark_payloads_seen(session_id, payloads)
+        return primed_count
 
     # -----------------------------------------------------------------------
     # Core: send reply
@@ -748,6 +773,17 @@ class XianyuAdapter(BaseChannelAdapter):
     def _remember_outgoing(self, session_id: str, text: str):
         payload = {"text": text, "message_id": f"outgoing-{len(self._seen_ids)}"}
         self._seen_ids.add(self._build_message_key(session_id, payload))
+
+    def _mark_payloads_seen(self, session_id: str, payloads: list[dict[str, Any]]) -> int:
+        """Mark a batch of payloads as seen without replying."""
+        marked = 0
+        for payload in payloads:
+            message_key = self._build_message_key(session_id, payload)
+            if message_key in self._seen_ids:
+                continue
+            self._seen_ids.add(message_key)
+            marked += 1
+        return marked
 
     def _match_conversation(
         self, session_id: str, conversations: list[dict[str, Any]]

@@ -69,6 +69,11 @@ run.bat xianyu
 
 # Ozon 实时监听（需要配置 Ozon API 凭证）
 run.bat ozon
+
+# 人工接管工单操作
+run.bat handoff list
+python -m app.main handoff accept <session_id>
+python -m app.main handoff resolve <session_id> 已处理完成
 ```
 
 ## 当前运行 / 运营流程（当前重点：闲鱼 + Ozon）
@@ -92,6 +97,10 @@ run.bat ozon
      - 运行 Agent
      - 发送回复
      - 回写会话状态
+   - live loop 已加入基础运行保障：
+     - 单条消息处理异常隔离，不影响后续消息
+     - 轮询失败指数退避重试
+     - 每分钟 heartbeat 日志，输出轮询次数、消息数、回复数、转人工数、失败数
 
 4. **会话层**
    - `conversation/message_router.py` 负责把原始消息包装成 Agent 可消费的上下文。
@@ -140,7 +149,12 @@ run.bat ozon
      - `needs_handoff`
      - `summary`
 
-10. **实际运营含义**
+10. **人工接管闭环**
+   - `handoff list`：查看当前已升级会话
+   - `handoff accept <session_id>`：标记人工已接单，工单状态切到 `in_progress`
+   - `handoff resolve <session_id> [note]`：标记人工处理完成，工单状态切到 `resolved`，会话状态切到 `resolved`
+
+11. **实际运营含义**
    - 这套系统现在不是单纯“自动聊天”。
    - 它已经具备一个基础客服运营内核：
      - 自动接待
@@ -156,7 +170,6 @@ run.bat ozon
 - 更细的工单摘要（自动带订单号、物流号、最近 3 轮对话）
 - Ozon / 闲鱼渠道差异化话术
 - 售后 SLA 超时提醒
-- 人工接管后的状态回写
 
 ## 目录结构
 

@@ -3,12 +3,13 @@ cd /d "%~dp0"
 set PYTHONPATH=%~dp0
 
 if "%1"=="" (
-    echo Usage: run.bat [cli^|xianyu^|ozon^|shopify^|chatwoot]
+    echo Usage: run.bat [cli^|xianyu^|ozon^|shopify^|chatwoot^|handoff]
     echo   cli      - Interactive CLI demo
     echo   xianyu   - Xianyu live mode (Playwright)
     echo   ozon     - Ozon marketplace mode (API)
     echo   shopify  - Shopify JSONL bridge mode
     echo   chatwoot - Chatwoot JSONL bridge mode
+    echo   handoff  - Handoff operations CLI
     echo.
     set MODE=cli
 ) else (

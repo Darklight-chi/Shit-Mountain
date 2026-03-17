@@ -32,6 +32,7 @@ class OzonAdapter(BaseChannelAdapter):
     def __init__(self):
         self._client: Optional[httpx.AsyncClient] = None
         self._seen_ids: set[str] = set()
+        self._baseline_initialized: bool = False
         self._last_poll: float = 0.0
 
     async def setup(self):
@@ -66,6 +67,14 @@ class OzonAdapter(BaseChannelAdapter):
         try:
             # Step 1: Get list of chats with unread messages
             chats = await self._list_unread_chats()
+
+            if not self._baseline_initialized:
+                primed = await self._prime_existing_unread_messages(chats)
+                self._baseline_initialized = True
+                self._last_poll = time.time()
+                if primed:
+                    logger.info(f"Ozon baseline initialized, skipped {primed} existing unread messages.")
+                return []
 
             for chat in chats:
                 chat_id = chat.get("chat_id", "")
@@ -108,6 +117,17 @@ class OzonAdapter(BaseChannelAdapter):
             logger.error(f"Error fetching Ozon messages: {exc}")
 
         return messages
+
+    async def _prime_existing_unread_messages(self, chats: list[dict]) -> int:
+        """On first poll, record current unread backlog as seen to avoid replying to stale messages."""
+        primed_count = 0
+        for chat in chats:
+            chat_id = chat.get("chat_id", "")
+            if not chat_id:
+                continue
+            history = await self._get_chat_history(chat_id)
+            primed_count += self._mark_history_seen(history)
+        return primed_count
 
     async def send_reply(self, session_id: str, text: str) -> bool:
         """Send a reply to an Ozon buyer chat."""
@@ -200,3 +220,14 @@ class OzonAdapter(BaseChannelAdapter):
             )
         except Exception:
             pass
+
+    def _mark_history_seen(self, history: list[dict]) -> int:
+        """Mark a batch of Ozon messages as seen without replying."""
+        marked = 0
+        for msg_data in history:
+            msg_id = str(msg_data.get("message_id", ""))
+            if not msg_id or msg_id in self._seen_ids:
+                continue
+            self._seen_ids.add(msg_id)
+            marked += 1
+        return marked

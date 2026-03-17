@@ -6,6 +6,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agent.graph import run_agent
+from conversation.escalation import EscalationManager
+from conversation.session_manager import SessionManager
 from database.db import init_db
 
 
@@ -76,6 +78,33 @@ def test_existing_handoff_session_does_not_create_new_flow():
     )
     assert result["needs_handoff"] is True
     assert "人工" in result["reply"]
+
+
+def test_handoff_accept_and_resolve_flow():
+    init_db()
+    session_mgr = SessionManager()
+    esc_mgr = EscalationManager()
+
+    session_mgr.ensure_session("xianyu", "handoff-demo", "demo_user")
+    session_mgr.mark_escalated("handoff-demo")
+    conversation = session_mgr.get_session("handoff-demo")
+    ticket_id = esc_mgr.create_ticket(
+        conversation_id=conversation["id"],
+        reason="manual_review",
+        summary="channel=xianyu | latest=需要人工介入",
+        priority="high",
+    )
+
+    accepted = esc_mgr.accept_ticket("handoff-demo")
+    assert accepted is not None
+    assert accepted["ticket"]["id"] == ticket_id
+    assert accepted["ticket"]["status"] == "in_progress"
+
+    resolved = esc_mgr.resolve_ticket("handoff-demo", "人工已处理完成")
+    assert resolved is not None
+    assert resolved["ticket"]["status"] == "resolved"
+    assert resolved["session"]["status"] == "resolved"
+    assert resolved["session"]["needs_handoff"] is False
 
 
 if __name__ == "__main__":
