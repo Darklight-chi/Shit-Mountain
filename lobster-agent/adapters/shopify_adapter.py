@@ -1,19 +1,15 @@
-"""Shopify chat adapter — placeholder for future migration."""
+"""Shopify bridge adapter backed by local JSONL inbox/outbox files."""
 
-from adapters.base import BaseChannelAdapter, IncomingMessage
-from loguru import logger
+from adapters.jsonl_channel_adapter import JsonlChannelAdapter
+from config.settings import SHOPIFY_INBOX_PATH, SHOPIFY_OUTBOX_PATH
 
 
-class ShopifyChatAdapter(BaseChannelAdapter):
+class ShopifyChatAdapter(JsonlChannelAdapter):
     channel_name = "shopify"
 
-    async def fetch_new_messages(self) -> list[IncomingMessage]:
-        logger.debug("ShopifyChatAdapter.fetch_new_messages — not implemented yet")
-        return []
-
-    async def send_reply(self, session_id: str, text: str) -> bool:
-        logger.debug("ShopifyChatAdapter.send_reply — not implemented yet")
-        return False
-
-    async def get_session_context(self, session_id: str) -> dict:
-        return {"channel": "shopify", "session_id": session_id}
+    def __init__(self):
+        super().__init__(
+            inbox_path=SHOPIFY_INBOX_PATH,
+            outbox_path=SHOPIFY_OUTBOX_PATH,
+            channel_name=self.channel_name,
+        )

@@ -46,9 +46,14 @@ class ConversationRepo:
                     channel=channel, session_id=session_id, user_id=user_id)
                 s.add(conv)
                 s.commit()
-            return {"id": conv.id, "status": conv.status,
-                    "last_intent": conv.last_intent,
-                    "needs_handoff": conv.needs_handoff}
+            return {
+                "id": conv.id,
+                "status": conv.status,
+                "last_intent": conv.last_intent,
+                "last_risk_level": conv.last_risk_level,
+                "needs_handoff": conv.needs_handoff,
+                "summary": conv.summary,
+            }
         finally:
             s.close()
 

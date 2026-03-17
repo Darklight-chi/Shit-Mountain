@@ -1,19 +1,15 @@
-"""Chatwoot adapter — placeholder for future migration."""
+"""Chatwoot bridge adapter backed by local JSONL inbox/outbox files."""
 
-from adapters.base import BaseChannelAdapter, IncomingMessage
-from loguru import logger
+from adapters.jsonl_channel_adapter import JsonlChannelAdapter
+from config.settings import CHATWOOT_INBOX_PATH, CHATWOOT_OUTBOX_PATH
 
 
-class ChatwootAdapter(BaseChannelAdapter):
+class ChatwootAdapter(JsonlChannelAdapter):
     channel_name = "chatwoot"
 
-    async def fetch_new_messages(self) -> list[IncomingMessage]:
-        logger.debug("ChatwootAdapter.fetch_new_messages — not implemented yet")
-        return []
-
-    async def send_reply(self, session_id: str, text: str) -> bool:
-        logger.debug("ChatwootAdapter.send_reply — not implemented yet")
-        return False
-
-    async def get_session_context(self, session_id: str) -> dict:
-        return {"channel": "chatwoot", "session_id": session_id}
+    def __init__(self):
+        super().__init__(
+            inbox_path=CHATWOOT_INBOX_PATH,
+            outbox_path=CHATWOOT_OUTBOX_PATH,
+            channel_name=self.channel_name,
+        )

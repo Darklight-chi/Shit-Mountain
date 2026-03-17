@@ -1,48 +1,82 @@
-"""LangGraph agent — the core decision engine."""
+"""Agent orchestration and tool dispatch."""
+
+from loguru import logger
 
 from agent.intent_classifier import classify_intent
-from agent.risk_detector import detect_risk
 from agent.response_generator import generate_reply
-from tools.faq_tool import faq_lookup
-from tools.order_tool import query_order
-from tools.tracking_tool import query_tracking
-from tools.refund_tool import check_refund, check_address_change, check_cancellation
+from agent.risk_detector import detect_risk
+from conversation.escalation import EscalationManager
 from tools.escalation_tool import escalate
+from tools.faq_tool import faq_lookup
 from tools.kb_tool import search_knowledge
+from tools.order_tool import query_order, resolve_order
+from tools.refund_tool import check_address_change, check_cancellation, check_refund
+from tools.tracking_tool import query_tracking_for_order
 from tools.translation_tool import detect_language
-from loguru import logger
+
+
+OPERATIONS_CHANNELS = {"xianyu", "ozon"}
+FOLLOW_UP_NUDGES_ZH = {"在吗", "还在吗", "有人吗", "在不在", "还在不", "你好", "您好"}
+FOLLOW_UP_NUDGES_EN = {"hi", "hello", "hey", "any update", "are you there", "still there"}
+RESUMABLE_INTENTS = {
+    "order_status",
+    "tracking_status",
+    "return_refund",
+    "damaged_or_wrong_item",
+    "address_change",
+    "cancellation",
+    "customs_tax",
+}
+MANUAL_REVIEW_INTENTS = {"address_change", "cancellation"}
 
 
 def run_agent(context: dict) -> dict:
-    """
-    Main agent pipeline:
-    message -> detect language -> classify intent -> detect risk
-    -> call tools -> generate reply
-    Returns: {"reply": str, "intent": str, "risk_level": str, "locale": str, "needs_handoff": bool}
-    """
+    """Run the end-to-end agent pipeline."""
     message = context["message"]
     history = context.get("history", [])
     user_id = context.get("user_id", "demo_user")
     session = context.get("session", {})
+    channel = context.get("channel", "")
     channel_context = context.get("channel_context", {})
     conv_id = session.get("id", 0)
+    order = resolve_order(message, user_id)
 
-    # Step 1: Detect language
     locale = detect_language(message)
     logger.info(f"Language: {locale}")
 
-    # Step 2: Classify intent
-    intent = classify_intent(message)
+    raw_intent = classify_intent(message)
+    intent = _recover_follow_up_intent(channel, message, raw_intent, session)
     logger.info(f"Intent: {intent}")
 
-    # Step 3: Detect risk
     risk_level = detect_risk(message, intent)
     logger.info(f"Risk: {risk_level}")
 
-    # Step 4: High risk -> immediate escalation
+    if session.get("needs_handoff") and channel in OPERATIONS_CHANNELS:
+        return _build_handoff_result(
+            locale=locale,
+            intent=intent,
+            risk_level=risk_level,
+            summary=_build_session_summary(channel, intent, risk_level, message, order, True),
+        )
+
+    operational_handoff = _check_operational_handoff(
+        channel=channel,
+        message=message,
+        session=session,
+        history=history,
+        intent=intent,
+        risk_level=risk_level,
+        order=order,
+        conv_id=conv_id,
+        locale=locale,
+    )
+    if operational_handoff:
+        return operational_handoff
+
     if risk_level == "high":
         handoff_msg = escalate(
-            conv_id, reason=intent,
+            conv_id,
+            reason=intent,
             summary=f"High-risk message: {message[:100]}",
             priority="urgent" if "赔偿" in message or "chargeback" in message.lower() else "high",
             locale=locale,
@@ -53,15 +87,17 @@ def run_agent(context: dict) -> dict:
             "risk_level": risk_level,
             "locale": locale,
             "needs_handoff": True,
+            "summary": _build_session_summary(channel, intent, risk_level, message, order, True),
         }
 
-    # Step 5: Call appropriate tool (with channel context for live order data)
-    tool_results = _call_tool(intent, message, user_id, locale, channel_context)
-
-    # Step 6: Generate polished reply
+    tool_results = _call_tool(intent, message, user_id, locale, channel_context, order)
     reply = generate_reply(
-        message=message, intent=intent, risk_level=risk_level,
-        tool_results=tool_results, history=history, locale=locale,
+        message=message,
+        intent=intent,
+        risk_level=risk_level,
+        tool_results=tool_results,
+        history=history,
+        locale=locale,
         channel_context=channel_context,
     )
 
@@ -71,22 +107,27 @@ def run_agent(context: dict) -> dict:
         "risk_level": risk_level,
         "locale": locale,
         "needs_handoff": False,
+        "summary": _build_session_summary(channel, intent, risk_level, message, order, False),
     }
 
 
-def _call_tool(intent: str, message: str, user_id: str, locale: str,
-               channel_context: dict = None) -> str:
+def _call_tool(
+    intent: str,
+    message: str,
+    user_id: str,
+    locale: str,
+    channel_context: dict | None = None,
+    order: dict | None = None,
+) -> str:
     """Dispatch to the right tool based on intent."""
     try:
         if intent == "general_greeting":
-            return ""  # handled directly in response generator
+            return ""
 
         if intent == "presale_product":
-            # Check if we have product info from the chat (Xianyu order cards)
             product_info = _extract_order_card_info(channel_context)
             if product_info:
                 return product_info
-            # Try FAQ first, then knowledge base
             faq = faq_lookup(message, locale)
             if faq:
                 return faq
@@ -97,7 +138,6 @@ def _call_tool(intent: str, message: str, user_id: str, locale: str,
             return faq or search_knowledge(message, locale)
 
         if intent == "order_status":
-            # Try live order data from channel first
             live_order = _extract_order_card_info(channel_context)
             if live_order:
                 return live_order
@@ -107,20 +147,16 @@ def _call_tool(intent: str, message: str, user_id: str, locale: str,
             live_order = _extract_order_card_info(channel_context)
             if live_order:
                 return live_order
-            order_result = query_order(message, user_id, locale)
-            return order_result or ""
+            return query_tracking_for_order(message, user_id, locale)
 
         if intent == "return_refund":
             return check_refund(intent, locale)
 
         if intent == "address_change":
-            # Try to determine order status from channel context
-            order_status = _detect_order_status(channel_context)
-            return check_address_change(order_status, locale)
+            return check_address_change(_detect_order_status(channel_context, order), locale)
 
         if intent == "cancellation":
-            order_status = _detect_order_status(channel_context)
-            return check_cancellation(order_status, locale)
+            return check_cancellation(_detect_order_status(channel_context, order), locale)
 
         if intent == "damaged_or_wrong_item":
             return check_refund(intent, locale)
@@ -128,57 +164,205 @@ def _call_tool(intent: str, message: str, user_id: str, locale: str,
         if intent == "customs_tax":
             return search_knowledge("customs", locale)
 
-        # Fallback: try FAQ then knowledge base
         faq = faq_lookup(message, locale)
         if faq:
             return faq
         return search_knowledge(message, locale)
 
-    except Exception as e:
-        logger.error(f"Tool error for intent '{intent}': {e}")
+    except Exception as exc:
+        logger.error(f"Tool error for intent '{intent}': {exc}")
         return ""
 
 
-def _extract_order_card_info(channel_context: dict = None) -> str:
-    """Extract order/product info from Xianyu scraped order cards."""
+def _recover_follow_up_intent(channel: str, message: str, intent: str, session: dict) -> str:
+    """Resume the previous issue when the user only nudges for an update."""
+    if channel not in OPERATIONS_CHANNELS or intent != "general_greeting":
+        return intent
+
+    last_intent = session.get("last_intent")
+    if last_intent not in RESUMABLE_INTENTS:
+        return intent
+
+    normalized = message.strip().lower()
+    if normalized in FOLLOW_UP_NUDGES_ZH or normalized in FOLLOW_UP_NUDGES_EN:
+        return last_intent
+    return intent
+
+
+def _check_operational_handoff(
+    channel: str,
+    message: str,
+    session: dict,
+    history: list[dict],
+    intent: str,
+    risk_level: str,
+    order: dict | None,
+    conv_id: int,
+    locale: str,
+) -> dict | None:
+    """Apply xianyu / ozon operational rules before normal auto-reply."""
+    if channel not in OPERATIONS_CHANNELS:
+        return None
+
+    recent_user_turns = sum(1 for item in history if item.get("role") == "user")
+    last_intent = session.get("last_intent")
+
+    if intent == "fallback" and last_intent == "fallback" and recent_user_turns >= 3:
+        return _handoff_with_ticket(
+            conv_id=conv_id,
+            locale=locale,
+            intent=intent,
+            risk_level="medium",
+            priority="medium",
+            reason="fallback_unresolved",
+            summary=f"Unresolved conversation after repeated fallback: {message[:100]}",
+            channel=channel,
+            order=order,
+            message=message,
+        )
+
+    if (
+        intent in MANUAL_REVIEW_INTENTS
+        and order
+        and order.get("status") in {"shipped", "delivered", "cancelled"}
+    ):
+        return _handoff_with_ticket(
+            conv_id=conv_id,
+            locale=locale,
+            intent=intent,
+            risk_level="medium",
+            priority="high",
+            reason=f"{intent}_{order['status']}",
+            summary=f"Manual review needed for order {order['order_id']} ({order['status']}): {message[:100]}",
+            channel=channel,
+            order=order,
+            message=message,
+        )
+
+    if (
+        intent in {"return_refund", "damaged_or_wrong_item", "customs_tax"}
+        and last_intent == intent
+        and recent_user_turns >= 3
+        and risk_level == "medium"
+    ):
+        return _handoff_with_ticket(
+            conv_id=conv_id,
+            locale=locale,
+            intent=intent,
+            risk_level=risk_level,
+            priority="medium",
+            reason=f"{intent}_repeated",
+            summary=f"Repeated after-sales issue requiring follow-up: {message[:100]}",
+            channel=channel,
+            order=order,
+            message=message,
+        )
+
+    return None
+
+
+def _handoff_with_ticket(
+    conv_id: int,
+    locale: str,
+    intent: str,
+    risk_level: str,
+    priority: str,
+    reason: str,
+    summary: str,
+    channel: str,
+    order: dict | None,
+    message: str,
+) -> dict:
+    reply = escalate(
+        conv_id,
+        reason=reason,
+        summary=summary,
+        priority=priority,
+        locale=locale,
+    )
+    return {
+        "reply": reply,
+        "intent": intent,
+        "risk_level": risk_level,
+        "locale": locale,
+        "needs_handoff": True,
+        "summary": _build_session_summary(channel, intent, risk_level, message, order, True),
+    }
+
+
+def _build_handoff_result(locale: str, intent: str, risk_level: str, summary: str) -> dict:
+    """Return an existing handoff message without creating a duplicate ticket."""
+    return {
+        "reply": EscalationManager.handoff_message(locale),
+        "intent": intent,
+        "risk_level": risk_level,
+        "locale": locale,
+        "needs_handoff": True,
+        "summary": summary,
+    }
+
+
+def _extract_order_card_info(channel_context: dict | None = None) -> str:
+    """Extract order/product info from scraped order cards."""
     if not channel_context:
         return ""
+
     order_cards = channel_context.get("order_cards", [])
     if not order_cards:
         return ""
 
     parts = []
-    for card in order_cards[-3:]:  # Last 3 cards max
+    for card in order_cards[-3:]:
         title = card.get("title", "")
         price = card.get("price", "")
         status = card.get("status", "")
-        if title:
-            line = f"商品: {title}"
-            if price:
-                line += f" | 价格: {price}元"
-            if status:
-                line += f" | 状态: {status}"
-            parts.append(line)
+        if not title:
+            continue
+        line = f"商品：{title}"
+        if price:
+            line += f" | 价格：{price}"
+        if status:
+            line += f" | 状态：{status}"
+        parts.append(line)
 
-    return "\n".join(parts) if parts else ""
+    return "\n".join(parts)
 
 
-def _detect_order_status(channel_context: dict = None) -> str:
-    """Try to detect order status from scraped order cards."""
+def _detect_order_status(channel_context: dict | None = None, order: dict | None = None) -> str:
+    """Try to detect order status from scraped order cards, then fall back to the order record."""
     if not channel_context:
-        return "paid"
+        return (order or {}).get("status", "paid")
+
     order_cards = channel_context.get("order_cards", [])
     if not order_cards:
-        return "paid"
+        return (order or {}).get("status", "paid")
 
     latest = order_cards[-1]
     status = latest.get("status", "")
 
-    # Map Xianyu status text to internal status
     if "已发货" in status or "运输" in status:
         return "shipped"
     if "已完成" in status or "交易成功" in status or "已签收" in status:
         return "delivered"
     if "已取消" in status:
         return "cancelled"
-    return "paid"
+    return (order or {}).get("status", "paid")
+
+
+def _build_session_summary(
+    channel: str,
+    intent: str,
+    risk_level: str,
+    message: str,
+    order: dict | None,
+    needs_handoff: bool,
+) -> str:
+    """Build a compact operation summary for dashboards and handoff review."""
+    parts = [f"channel={channel}", f"intent={intent}", f"risk={risk_level}"]
+    if needs_handoff:
+        parts.append("handoff=yes")
+    if order and order.get("order_id"):
+        parts.append(f"order={order['order_id']}")
+        parts.append(f"order_status={order.get('status', '')}")
+    parts.append(f"latest={message[:60]}")
+    return " | ".join(parts)

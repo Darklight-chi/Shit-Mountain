@@ -1,16 +1,31 @@
-"""Lobster Agent — main entry point."""
+"""Lobster Agent main entry point."""
 
-import sys
 import asyncio
+import sys
 from pathlib import Path
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from loguru import logger
+
+from app.runner import (
+    run_chatwoot_loop,
+    run_cli_demo,
+    run_ozon_loop,
+    run_shopify_loop,
+    run_xianyu_loop,
+)
 from config.settings import LOG_LEVEL
 from database.db import init_db
-from app.runner import run_xianyu_loop, run_ozon_loop, run_cli_demo
+
+
+LIVE_MODE_RUNNERS = {
+    "xianyu": run_xianyu_loop,
+    "ozon": run_ozon_loop,
+    "shopify": run_shopify_loop,
+    "chatwoot": run_chatwoot_loop,
+}
 
 
 def setup_logging():
@@ -26,18 +41,18 @@ def main():
 
     mode = sys.argv[1] if len(sys.argv) > 1 else "cli"
 
-    if mode == "xianyu":
-        logger.info("Starting Xianyu live mode...")
-        asyncio.run(run_xianyu_loop())
-    elif mode == "ozon":
-        logger.info("Starting Ozon live mode...")
-        asyncio.run(run_ozon_loop())
-    elif mode == "cli":
+    if mode == "cli":
         logger.info("Starting CLI demo mode...")
         run_cli_demo()
-    else:
-        print(f"Unknown mode: {mode}")
-        print("Usage: python -m app.main [cli|xianyu|ozon]")
+        return
+
+    if mode in LIVE_MODE_RUNNERS:
+        logger.info(f"Starting {mode} live mode...")
+        asyncio.run(LIVE_MODE_RUNNERS[mode]())
+        return
+
+    print(f"Unknown mode: {mode}")
+    print("Usage: python -m app.main [cli|xianyu|ozon|shopify|chatwoot]")
 
 
 if __name__ == "__main__":
