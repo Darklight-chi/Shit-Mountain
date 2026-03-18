@@ -1,15 +1,13 @@
 """Knowledge base retrieval tool using markdown files."""
 
-from pathlib import Path
 from config.settings import KNOWLEDGE_DIR
-from loguru import logger
 
 
-def load_knowledge(locale: str = "zh", category: str = None) -> str:
+def load_knowledge(locale: str = "zh", category: str | None = None) -> str:
     """Load knowledge base content for a locale and optional category."""
     kb_dir = KNOWLEDGE_DIR / locale
     if not kb_dir.exists():
-        kb_dir = KNOWLEDGE_DIR / "zh"  # fallback
+        kb_dir = KNOWLEDGE_DIR / "zh"
 
     if category:
         fpath = kb_dir / f"{category}.md"
@@ -17,10 +15,9 @@ def load_knowledge(locale: str = "zh", category: str = None) -> str:
             return fpath.read_text(encoding="utf-8")
         return ""
 
-    # Load all knowledge files
     texts = []
-    for f in sorted(kb_dir.glob("*.md")):
-        texts.append(f.read_text(encoding="utf-8"))
+    for fpath in sorted(kb_dir.glob("*.md")):
+        texts.append(fpath.read_text(encoding="utf-8"))
     return "\n\n---\n\n".join(texts)
 
 
@@ -32,18 +29,15 @@ def search_knowledge(query: str, locale: str = "zh") -> str:
 
     results = []
     query_lower = query.lower()
-    for f in kb_dir.glob("*.md"):
-        content = f.read_text(encoding="utf-8")
-        if query_lower in content.lower():
-            # Extract relevant paragraph
-            for para in content.split("\n\n"):
-                if query_lower in para.lower():
-                    results.append(para.strip())
-                    break
+    for fpath in kb_dir.glob("*.md"):
+        content = fpath.read_text(encoding="utf-8")
+        if query_lower not in content.lower():
+            continue
+        for para in content.split("\n\n"):
+            if query_lower in para.lower():
+                results.append(para.strip())
+                break
 
     if results:
         return "\n\n".join(results[:3])
-
-    if locale == "zh":
-        return "知识库中未找到相关信息。"
-    return "No relevant information found in the knowledge base."
+    return ""

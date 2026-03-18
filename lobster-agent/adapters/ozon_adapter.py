@@ -11,6 +11,7 @@ Auth: Client-Id + Api-Key headers
 Docs: https://docs.ozon.ru/api/seller/
 """
 
+import hashlib
 import time
 from typing import Any, Optional
 
@@ -22,6 +23,7 @@ from config.settings import OZON_CLIENT_ID, OZON_API_KEY
 
 
 OZON_API_BASE = "https://api-seller.ozon.ru"
+BASELINE_GRACE_SECONDS = 8.0
 
 
 class OzonAdapter(BaseChannelAdapter):
@@ -32,7 +34,10 @@ class OzonAdapter(BaseChannelAdapter):
     def __init__(self):
         self._client: Optional[httpx.AsyncClient] = None
         self._seen_ids: set[str] = set()
+        self._recent_replies: dict[str, tuple[str, float]] = {}
+        self.last_send_suppressed: bool = False
         self._baseline_initialized: bool = False
+        self._startup_at: float = time.time()
         self._last_poll: float = 0.0
 
     async def setup(self):
@@ -69,7 +74,9 @@ class OzonAdapter(BaseChannelAdapter):
             chats = await self._list_unread_chats()
 
             if not self._baseline_initialized:
-                primed = await self._prime_existing_unread_messages(chats)
+                if self._should_wait_for_initial_baseline(chats):
+                    return []
+                primed = await self._prime_existing_unread_messages(chats) if chats else 0
                 self._baseline_initialized = True
                 self._last_poll = time.time()
                 if primed:
@@ -84,20 +91,20 @@ class OzonAdapter(BaseChannelAdapter):
                 # Step 2: Get message history for each unread chat
                 history = await self._get_chat_history(chat_id)
                 for msg_data in history:
-                    msg_id = str(msg_data.get("message_id", ""))
-                    if msg_id in self._seen_ids:
+                    message_key = self._history_message_key(chat_id, msg_data)
+                    if message_key in self._seen_ids:
                         continue
                     # Only process buyer messages (not our own)
                     if msg_data.get("is_seller", False):
-                        self._seen_ids.add(msg_id)
+                        self._seen_ids.add(message_key)
                         continue
 
                     text = msg_data.get("text", "").strip()
                     if not text:
-                        self._seen_ids.add(msg_id)
+                        self._seen_ids.add(message_key)
                         continue
 
-                    self._seen_ids.add(msg_id)
+                    self._seen_ids.add(message_key)
                     messages.append(
                         IncomingMessage(
                             channel=self.channel_name,
@@ -128,6 +135,11 @@ class OzonAdapter(BaseChannelAdapter):
             history = await self._get_chat_history(chat_id)
             primed_count += self._mark_history_seen(history)
         return primed_count
+
+    def _should_wait_for_initial_baseline(self, chats: list[dict]) -> bool:
+        if chats:
+            return False
+        return (time.time() - self._startup_at) < BASELINE_GRACE_SECONDS
 
     async def send_reply(self, session_id: str, text: str) -> bool:
         """Send a reply to an Ozon buyer chat."""
@@ -225,9 +237,44 @@ class OzonAdapter(BaseChannelAdapter):
         """Mark a batch of Ozon messages as seen without replying."""
         marked = 0
         for msg_data in history:
-            msg_id = str(msg_data.get("message_id", ""))
-            if not msg_id or msg_id in self._seen_ids:
+            message_key = self._history_message_key("", msg_data)
+            if not message_key or message_key in self._seen_ids:
                 continue
-            self._seen_ids.add(msg_id)
+            self._seen_ids.add(message_key)
             marked += 1
         return marked
+
+    @staticmethod
+    def _history_message_key(chat_id: str, msg_data: dict[str, Any]) -> str:
+        message_id = str(msg_data.get("message_id", "")).strip()
+        if message_id:
+            return message_id
+
+        basis = "|".join(
+            [
+                str(chat_id or msg_data.get("chat_id", "")).strip(),
+                str(msg_data.get("created_at", "")).strip(),
+                str(msg_data.get("is_seller", False)).strip(),
+                str(msg_data.get("text", "")).strip(),
+            ]
+        )
+        if not basis.replace("|", "").strip():
+            return ""
+        return f"ozon_fallback_{hashlib.sha1(basis.encode('utf-8')).hexdigest()[:16]}"
+
+    def _should_suppress_duplicate_reply(self, session_id: str, text: str) -> bool:
+        normalized_text = " ".join((text or "").split()).strip()
+        if not session_id or not normalized_text:
+            return False
+
+        previous = self._recent_replies.get(session_id)
+        if not previous:
+            return False
+
+        previous_text, sent_at = previous
+        return previous_text == normalized_text and (time.time() - sent_at) <= 20
+
+    def _record_recent_reply(self, session_id: str, text: str):
+        normalized_text = " ".join((text or "").split()).strip()
+        if session_id and normalized_text:
+            self._recent_replies[session_id] = (normalized_text, time.time())

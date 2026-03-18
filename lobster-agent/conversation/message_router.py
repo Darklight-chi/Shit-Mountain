@@ -2,19 +2,13 @@
 
 from adapters.base import IncomingMessage
 from conversation.session_manager import SessionManager
-from conversation.deduplicator import Deduplicator
-from loguru import logger
 
 
 class MessageRouter:
     def __init__(self):
         self.session_mgr = SessionManager()
-        self.dedup = Deduplicator()
 
     def should_process(self, msg: IncomingMessage) -> bool:
-        if self.dedup.is_duplicate(msg.channel, msg.session_id, msg.content):
-            logger.debug(f"Duplicate message skipped: {msg.content[:30]}")
-            return False
         return True
 
     def prepare_context(self, msg: IncomingMessage) -> dict:

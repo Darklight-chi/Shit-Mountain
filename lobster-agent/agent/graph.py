@@ -21,6 +21,7 @@ FOLLOW_UP_NUDGES_EN = {"hi", "hello", "hey", "any update", "are you there", "sti
 RESUMABLE_INTENTS = {
     "order_status",
     "tracking_status",
+    "shipping_time",
     "return_refund",
     "damaged_or_wrong_item",
     "address_change",
@@ -28,16 +29,22 @@ RESUMABLE_INTENTS = {
     "customs_tax",
 }
 MANUAL_REVIEW_INTENTS = {"address_change", "cancellation"}
+AUTO_REPLY_DURING_HANDOFF_INTENTS = {
+    "order_status",
+    "tracking_status",
+    "shipping_time",
+    "presale_product",
+}
 
 
 def run_agent(context: dict) -> dict:
     """Run the end-to-end agent pipeline."""
-    message = context["message"]
+    channel = context.get("channel", "")
+    channel_context = context.get("channel_context", {})
+    message = _normalize_customer_message(context["message"], channel, channel_context)
     history = context.get("history", [])
     user_id = context.get("user_id", "demo_user")
     session = context.get("session", {})
-    channel = context.get("channel", "")
-    channel_context = context.get("channel_context", {})
     conv_id = session.get("id", 0)
     order = resolve_order(message, user_id)
 
@@ -51,7 +58,11 @@ def run_agent(context: dict) -> dict:
     risk_level = detect_risk(message, intent)
     logger.info(f"Risk: {risk_level}")
 
-    if session.get("needs_handoff") and channel in OPERATIONS_CHANNELS:
+    if (
+        session.get("needs_handoff")
+        and channel in OPERATIONS_CHANNELS
+        and _should_keep_existing_handoff(intent, risk_level)
+    ):
         return _build_handoff_result(
             locale=locale,
             intent=intent,
@@ -125,6 +136,9 @@ def _call_tool(
             return ""
 
         if intent == "presale_product":
+            price_reply = _build_price_negotiation_reply(message, locale, channel_context)
+            if price_reply:
+                return price_reply
             product_info = _extract_order_card_info(channel_context)
             if product_info:
                 return product_info
@@ -261,6 +275,15 @@ def _check_operational_handoff(
     return None
 
 
+def _should_keep_existing_handoff(intent: str, risk_level: str) -> bool:
+    """Only keep an existing handoff pinned for intents we still should not auto-handle."""
+    if risk_level == "high":
+        return True
+    if intent in AUTO_REPLY_DURING_HANDOFF_INTENTS:
+        return False
+    return True
+
+
 def _handoff_with_ticket(
     conv_id: int,
     locale: str,
@@ -326,6 +349,60 @@ def _extract_order_card_info(channel_context: dict | None = None) -> str:
         parts.append(line)
 
     return "\n".join(parts)
+
+
+def _build_price_negotiation_reply(
+    message: str,
+    locale: str,
+    channel_context: dict | None = None,
+) -> str:
+    normalized = message.lower()
+    markers_zh = (
+        "便宜",
+        "低一点",
+        "少一点",
+        "最低",
+        "还能少",
+        "议价",
+        "砍价",
+        "抹零",
+        "刀吗",
+    )
+    if locale == "zh" and any(marker in normalized for marker in markers_zh):
+        order_cards = (channel_context or {}).get("order_cards", [])
+        latest_card = order_cards[-1] if order_cards else {}
+        price = (latest_card.get("price") or "").strip()
+        if price:
+            return f"亲，这边标的就是现在能给到的实在价了，当前这款是{price}元，空间确实不大啦，真心想要的话我给您尽快安排~"
+        return "亲，这边已经是比较实在的价格啦，空间确实不大，真心想要的话我这边可以优先给您安排~"
+
+    if locale == "en" and any(marker in normalized for marker in ("discount", "best price", "lower", "cheaper")):
+        return "This is already a pretty fair price, so there is not much room left. If you really want it, I can help arrange it quickly."
+
+    return ""
+
+
+def _normalize_customer_message(
+    message: str,
+    channel: str,
+    channel_context: dict | None = None,
+) -> str:
+    """Trim channel-specific noise from scraped text before intent/risk handling."""
+    cleaned = (message or "").strip()
+    if not cleaned:
+        return ""
+
+    if channel == "xianyu":
+        title = ((channel_context or {}).get("conversation_title") or "").strip()
+        if title and cleaned.startswith(title):
+            stripped = cleaned[len(title):].strip(" :：,-，。！？!?")
+            if stripped:
+                cleaned = stripped
+        for suffix in ("已读", "未读"):
+            if cleaned.endswith(suffix):
+                cleaned = cleaned[: -len(suffix)].strip()
+
+    return cleaned
 
 
 def _detect_order_status(channel_context: dict | None = None, order: dict | None = None) -> str:

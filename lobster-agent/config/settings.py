@@ -14,10 +14,11 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "sk-placeholder")
 OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "http://localhost:3000/v1").rstrip("/")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "openclaw:default")
 OPENCLAW_AGENT_ID = os.getenv("OPENCLAW_AGENT_ID", "")
+LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "6"))
 
 # Channel — Xianyu
 XIANYU_HEADLESS = os.getenv("XIANYU_HEADLESS", "false").lower() == "true"
-XIANYU_POLL_INTERVAL = int(os.getenv("XIANYU_POLL_INTERVAL", "5"))
+XIANYU_POLL_INTERVAL = int(os.getenv("XIANYU_POLL_INTERVAL", "1"))
 XIANYU_MAX_REPLY_LENGTH = int(os.getenv("XIANYU_MAX_REPLY_LENGTH", "500"))
 
 # Channel — Ozon

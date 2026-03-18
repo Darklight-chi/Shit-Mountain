@@ -5,7 +5,13 @@ from openai import OpenAI
 from loguru import logger
 
 from config.prompts import RESPONSE_GENERATION_PROMPT, SYSTEM_PROMPTS, XIANYU_GREETINGS_ZH
-from config.settings import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, OPENCLAW_AGENT_ID
+from config.settings import (
+    OPENAI_API_KEY,
+    OPENAI_BASE_URL,
+    OPENAI_MODEL,
+    OPENCLAW_AGENT_ID,
+    LLM_TIMEOUT_SECONDS,
+)
 
 
 def get_llm_client() -> OpenAI:
@@ -30,7 +36,15 @@ def generate_reply(
             return random.choice(XIANYU_GREETINGS_ZH)
         return "Hi there! What can I help you with?"
 
-    if tool_results and risk_level == "low" and intent != "fallback":
+    if tool_results and risk_level == "low" and intent in {
+        "order_status",
+        "tracking_status",
+        "return_refund",
+        "address_change",
+        "cancellation",
+        "damaged_or_wrong_item",
+        "customs_tax",
+    }:
         return tool_results
 
     history_text = "\n".join(f"{m['role']}: {m['content']}" for m in history[-5:]) if history else "无"
@@ -58,6 +72,7 @@ def generate_reply(
             ],
             temperature=0.3,
             max_tokens=300,
+            timeout=LLM_TIMEOUT_SECONDS,
         )
         reply = resp.choices[0].message.content.strip()
         logger.info(f"LLM reply ({OPENAI_MODEL}): {reply[:80]}...")
@@ -66,6 +81,8 @@ def generate_reply(
         logger.error(f"LLM call failed: {exc}")
         if tool_results:
             return tool_results
+        if locale == "zh" and intent == "presale_product":
+            return "亲，您说的这个我先帮您看下，您也可以直接说下最关心价格、成色还是发货哈~"
         if locale == "zh":
             return "抱歉，系统暂时无法处理您的请求，请稍后再试或联系人工客服。"
         return "Sorry, I'm unable to process your request right now. Please try again or contact our support team."

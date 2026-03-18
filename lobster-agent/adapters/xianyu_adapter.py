@@ -36,6 +36,7 @@ from config.settings import (
 
 
 SESSION_DIR = Path(__file__).resolve().parent.parent / "storage" / "xianyu_session"
+BASELINE_GRACE_SECONDS = 8.0
 
 # ---------------------------------------------------------------------------
 # Stealth injection script — runs before any page JS
@@ -103,8 +104,90 @@ MESSAGE_LIST_SCRIPT = """
     || node?.getAttribute?.("data-message-id")
     || ""
   );
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
 
-  // Multi-strategy: try several selectors for message bubbles
+  const normalizeText = (text) => text.replace(/\\s+/g, " ").trim();
+  const timeLikePattern = /^(?:\\d{1,2}:\\d{2}|\\d+\\s*(?:分钟前|小时前|天前)|昨天|今天|星期[一二三四五六日天]|刚刚)$/;
+  const noiseTexts = new Set(["消息", "通知消息", "系统消息", "闲鱼", "联系卖家", "我的发布", "已读", "未读"]);
+  const isVisible = (node) => {
+    if (!(node instanceof HTMLElement)) return false;
+    const rect = node.getBoundingClientRect();
+    const style = window.getComputedStyle(node);
+    return (
+      rect.width > 20
+      && rect.height > 14
+      && rect.bottom > 80
+      && rect.top < viewportHeight - 90
+      && style.visibility !== "hidden"
+      && style.display !== "none"
+      && style.opacity !== "0"
+    );
+  };
+  const isComposer = (node) => {
+    const text = normalizeText(textOf(node));
+    const cls = classOf(node).toLowerCase();
+    if (node.closest("[role='textbox']")) return true;
+    return (
+      node.closest("textarea, [contenteditable='true'], form")
+      || /enter|发送|输入消息|chat-input|editor|footer/.test(text + " " + cls)
+    );
+  };
+  const composer = document.querySelector("textarea, [contenteditable='true'], [role='textbox']");
+  const composerRect = composer?.getBoundingClientRect?.() || null;
+  const chatRegionTop = 70;
+  const chatRegionBottom = composerRect ? Math.max(chatRegionTop + 120, composerRect.top - 8) : viewportHeight - 110;
+  const chatRegionLeft = viewportWidth * 0.22;
+  const chatRegionRight = viewportWidth * 0.98;
+  const isLikelyChatRegion = (rect) => (
+    rect.bottom > chatRegionTop
+    && rect.top < chatRegionBottom
+    && rect.left > chatRegionLeft
+    && rect.right < chatRegionRight
+  );
+  const isLikelyNoiseText = (text) => (
+    !text
+    || text.length > 500
+    || /^\\d+$/.test(text)
+    || timeLikePattern.test(text)
+    || noiseTexts.has(text)
+  );
+  const inferDirection = (node, row) => {
+    const nodeRect = node.getBoundingClientRect();
+    const rowRect = (row || node).getBoundingClientRect();
+    const rect = rowRect.width > nodeRect.width * 1.8 ? nodeRect : rowRect;
+    const cls = `${classOf(row).toLowerCase()} ${classOf(node).toLowerCase()}`;
+    const avatarNode = row?.querySelector?.("img, [class*='avatar'], [class*='Avatar']");
+    if (/(self|mine|owner|seller|me|right|send|outgoing)/.test(cls)) {
+      return { outgoing: true, incoming: false };
+    }
+    if (/(other|buyer|customer|left|receive|incoming)/.test(cls)) {
+      return { outgoing: false, incoming: true };
+    }
+    if (avatarNode instanceof HTMLElement) {
+      const avatarRect = avatarNode.getBoundingClientRect();
+      const avatarCenter = avatarRect.left + avatarRect.width / 2;
+      if (avatarCenter >= viewportWidth * 0.58) {
+        return { outgoing: true, incoming: false };
+      }
+      if (avatarCenter <= viewportWidth * 0.42) {
+        return { outgoing: false, incoming: true };
+      }
+    }
+    const leftGap = rect.left;
+    const rightGap = viewportWidth - rect.right;
+    if (leftGap > rightGap + 40) {
+      return { outgoing: true, incoming: false };
+    }
+    if (rightGap > leftGap + 40) {
+      return { outgoing: false, incoming: true };
+    }
+    const centerX = rect.left + rect.width / 2;
+    return centerX >= viewportWidth * 0.58
+      ? { outgoing: true, incoming: false }
+      : { outgoing: false, incoming: true };
+  };
+
   const selectors = [
     "[data-message-id]",
     "[data-mid]",
@@ -116,40 +199,59 @@ MESSAGE_LIST_SCRIPT = """
     "[class*='msg']",
     "[class*='bubble']",
     "[class*='chat-item']",
+    "[role='listitem']",
+    "li",
   ];
-  const bubbles = Array.from(document.querySelectorAll(selectors.join(",")));
 
-  return bubbles
-    .map((node, index) => {
-      const text = textOf(node);
-      if (!text || text.length > 2000) return null;
+  const seen = new Set();
+  const results = [];
+  const pushResult = (node, index, fallback = false) => {
+    if (!isVisible(node) || isComposer(node)) return;
+    const rawText = normalizeText(textOf(node));
+    if (isLikelyNoiseText(rawText)) return;
 
-      const row = node.closest(
-        "[data-message-id], [data-mid], [class*='message'], [class*='msg'], [class*='bubble'], li, [role='listitem']"
-      ) || node;
-      const rowClass = classOf(row).toLowerCase();
-      const bubbleClass = classOf(node).toLowerCase();
-      const side = rowClass + " " + bubbleClass;
+    const row = node.closest(
+      "[data-message-id], [data-mid], [class*='message'], [class*='msg'], [class*='bubble'], li, [role='listitem']"
+    ) || node;
+    const rect = row.getBoundingClientRect();
+    if (!isLikelyChatRegion(rect)) return;
+    if (rect.width < 36 || rect.height < 18) return;
 
-      const outgoing = /(self|mine|owner|seller|me|right|send|outgoing)/.test(side);
-      const incoming = /(other|buyer|customer|left|receive|incoming)/.test(side);
+    const key = `${dataIdOf(row) || dataIdOf(node)}|${rawText}|${Math.round(rect.top)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
 
-      const authorNode = row.querySelector("[class*='nick'], [class*='name'], [data-role='name']");
-      const timeNode = row.querySelector("time, [class*='time'], [class*='Time']");
+    const authorNode = row.querySelector("[class*='nick'], [class*='name'], [data-role='name']");
+    const timeNode = row.querySelector("time, [class*='time'], [class*='Time']");
+    const direction = inferDirection(node, row);
 
-      return {
-        index,
-        text,
-        message_id: dataIdOf(row) || dataIdOf(node),
-        author: textOf(authorNode),
-        timestamp: textOf(timeNode),
-        outgoing,
-        incoming,
-        class_name: classOf(row) || classOf(node),
-      };
-    })
-    .filter(Boolean)
-    .slice(-30);
+    results.push({
+      index,
+      text: rawText,
+      message_id: dataIdOf(row) || dataIdOf(node) || "",
+      author: normalizeText(textOf(authorNode)),
+      timestamp: normalizeText(textOf(timeNode)),
+      outgoing: direction.outgoing,
+      incoming: direction.incoming,
+      class_name: classOf(row) || classOf(node),
+      top: Math.round(rect.top),
+      left: Math.round(rect.left),
+      fallback,
+    });
+  };
+
+  Array.from(document.querySelectorAll(selectors.join(","))).forEach((node, index) => {
+    pushResult(node, index, false);
+  });
+
+  if (results.length === 0) {
+    const fallbackNodes = Array.from(document.querySelectorAll("div, span, p"));
+    fallbackNodes.forEach((node, index) => {
+      pushResult(node, index, true);
+    });
+  }
+
+  return results.sort((a, b) => a.index - b.index).slice(-30);
 }
 """
 
@@ -160,6 +262,42 @@ CONVERSATION_LIST_SCRIPT = """
 () => {
   const textOf = (node) => (node?.innerText || node?.textContent || "").trim();
   const classOf = (node) => (node?.className && typeof node.className === "string") ? node.className : "";
+  const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+  const normalizeText = (text) => text.replace(/\\s+/g, " ").trim();
+  const timeLikePattern = /^(?:\\d{1,2}:\\d{2}|\\d+\\s*(?:分钟前|小时前|天前)|昨天|今天|星期[一二三四五六日天]|刚刚)$/;
+  const bannedTexts = new Set(["消息", "通知消息", "系统消息", "闲鱼", "联系卖家", "我的发布", "商品", "闲置", "已读", "未读"]);
+  const isMeaningfulLine = (line) => {
+    if (!line) return false;
+    if (bannedTexts.has(line)) return false;
+    if (/^\\d+$/.test(line)) return false;
+    if (timeLikePattern.test(line)) return false;
+    if (/^(?:订单|评价|确认收货|交易成功)/.test(line)) return false;
+    return true;
+  };
+  const extractLines = (node) => (
+    normalizeText(textOf(node))
+      .split(/\\n+/)
+      .flatMap((line) => normalizeText(line).split(/\\s+/))
+      .map((line) => normalizeText(line))
+      .filter(isMeaningfulLine)
+  );
+  const isLikelySidebarItem = (node) => {
+    if (!(node instanceof HTMLElement)) return false;
+    const rect = node.getBoundingClientRect();
+    if (rect.width < 120 || rect.height < 36) return false;
+    return (
+      rect.left < viewportWidth * 0.42
+      && rect.right <= viewportWidth * 0.58
+      && rect.top >= 60
+      && rect.bottom <= viewportHeight - 20
+    );
+  };
+  const isLikelyTitleLine = (line) => (
+    isMeaningfulLine(line)
+    && line.length <= 24
+    && !/[。！？~，,、:：]/.test(line)
+  );
 
   const selectors = [
     "[data-session-id]",
@@ -177,6 +315,7 @@ CONVERSATION_LIST_SCRIPT = """
 
   return candidates
     .map((node, index) => {
+      if (!isLikelySidebarItem(node)) return null;
       const sessionId = (
         node.getAttribute("data-session-id")
         || node.getAttribute("data-conversation-id")
@@ -186,13 +325,29 @@ CONVERSATION_LIST_SCRIPT = """
 
       const titleNode = node.querySelector("[class*='title'], [class*='name'], [class*='nick'], [class*='Title'], [class*='Name']");
       const previewNode = node.querySelector("[class*='preview'], [class*='snippet'], [class*='last'], [class*='Preview'], [class*='Snippet']");
+      const avatarNode = node.querySelector("img, [class*='avatar'], [class*='Avatar']");
       const badgeNode = node.querySelector("[class*='unread'], [class*='badge'], [class*='Unread'], [aria-label*='unread'], [aria-label*='未读']");
       const active = /(active|selected|current)/.test(classOf(node).toLowerCase());
 
-      const title = textOf(titleNode) || textOf(node).split("\\n").find(Boolean) || "";
-      const preview = textOf(previewNode);
+      const titleLines = extractLines(titleNode);
+      const previewLines = extractLines(previewNode);
+      const nodeLines = extractLines(node);
+      const lines = [...titleLines, ...previewLines, ...nodeLines];
+      const dedupedLines = lines.filter((line, lineIndex) => lines.indexOf(line) === lineIndex);
+      const title = titleLines.find(isLikelyTitleLine)
+        || dedupedLines.find(isLikelyTitleLine)
+        || titleLines[0]
+        || dedupedLines[0]
+        || "";
+      const preview = previewLines.find((line) => line !== title)
+        || dedupedLines.find((line) => line !== title)
+        || "";
+      const fullText = textOf(node);
+      const hasConversationSignals = !!(avatarNode || preview || badgeNode || sessionId);
+      const invalidTitle = ["消息", "通知消息", "联系卖家", "闲鱼", "我发布的", "商品", "闲置"].includes(title);
+      const invalidTitleClean = !isMeaningfulLine(title);
       const key = sessionId || `${title}-${preview}`;
-      if (!title || seen.has(key)) return null;
+      if (!title || seen.has(key) || !hasConversationSignals || invalidTitle || invalidTitleClean || fullText === title) return null;
       seen.add(key);
 
       return {
@@ -226,6 +381,37 @@ PAGE_STATE_SCRIPT = """
     hasChatPanel: !!document.querySelector("textarea, [contenteditable='true']"),
     title: document.title,
   };
+}
+"""
+
+SCROLL_CHAT_TO_BOTTOM_SCRIPT = """
+() => {
+  const selectors = [
+    "[class*='message-list']",
+    "[class*='MessageList']",
+    "[class*='chat-content']",
+    "[class*='ChatContent']",
+    "[class*='message-content']",
+    "[class*='MessageContent']",
+    "[class*='scroll']",
+    "[class*='Scroll']",
+    "[role='log']",
+    "[role='main']"
+  ];
+  const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+
+  for (const node of document.querySelectorAll(selectors.join(","))) {
+    if (!(node instanceof HTMLElement)) continue;
+    const style = window.getComputedStyle(node);
+    const canScroll = node.scrollHeight - node.clientHeight > 80;
+    const scrollableY = /(auto|scroll)/.test(style.overflowY || "");
+    const rect = node.getBoundingClientRect();
+    const inChatArea = rect.top < viewportHeight && rect.bottom > viewportHeight * 0.35;
+    if (!canScroll || !scrollableY || !inChatArea) continue;
+    node.scrollTop = node.scrollHeight;
+  }
+
+  window.scrollTo(0, document.body.scrollHeight);
 }
 """
 
@@ -278,12 +464,29 @@ ORDER_SCRAPE_SCRIPT = """
 TEXTAREA_SELECTORS = [
     "textarea",
     "[contenteditable='true']",
+    "[role='textbox']",
+    "textarea[placeholder*='输入']",
+    "textarea[placeholder*='发送']",
+    "[contenteditable='true'][data-placeholder*='输入']",
+    "[contenteditable='true'][data-placeholder*='发送']",
+    "[contenteditable='true'][placeholder*='输入']",
+    "[contenteditable='true'][placeholder*='发送']",
+    "[role='textbox'][contenteditable='true']",
+    "[role='textbox'][placeholder]",
     "[class*='editor'] [contenteditable='true']",
     "[class*='Editor'] [contenteditable='true']",
     "[class*='input'] textarea",
     "[class*='Input'] textarea",
+    "[class*='input'] [contenteditable='true']",
+    "[class*='Input'] [contenteditable='true']",
     "[class*='chat-input'] textarea",
     "[class*='ChatInput'] textarea",
+    "[class*='chat-input'] [contenteditable='true']",
+    "[class*='ChatInput'] [contenteditable='true']",
+    "[class*='footer'] textarea",
+    "[class*='Footer'] textarea",
+    "[class*='footer'] [contenteditable='true']",
+    "[class*='Footer'] [contenteditable='true']",
 ]
 
 SEND_BUTTON_SELECTORS = [
@@ -318,7 +521,12 @@ class XianyuAdapter(BaseChannelAdapter):
         self._pw = None
         self._seen_ids: set[str] = set()
         self._baseline_initialized: bool = False
+        self._startup_at: float = time.time()
         self._conversation_cache: dict[str, dict[str, Any]] = {}
+        self._conversation_ids_by_title: dict[str, str] = {}
+        self._session_id_aliases: dict[str, str] = {}
+        self._recent_replies: dict[str, tuple[str, float]] = {}
+        self.last_send_suppressed: bool = False
         self._last_activity: float = 0.0
         self._consecutive_errors: int = 0
         self._max_consecutive_errors: int = 5
@@ -366,6 +574,7 @@ class XianyuAdapter(BaseChannelAdapter):
             else await self._context.new_page()
         )
 
+        self._startup_at = time.time()
         await self._navigate_to_im()
         self._last_activity = time.time()
 
@@ -423,10 +632,28 @@ class XianyuAdapter(BaseChannelAdapter):
         messages: list[IncomingMessage] = []
         try:
             conversations = await self._read_conversation_summaries()
-            targets = [c for c in conversations if c.get("unread")] or conversations[:1]
+            human_conversations = [
+                c for c in conversations if not self._is_non_human_conversation(c)
+            ]
+            targets = self._select_poll_targets(human_conversations)
+            logger.debug(
+                "Xianyu poll: total_conversations={} human_conversations={} targets={}",
+                len(conversations),
+                len(human_conversations),
+                [
+                    {
+                        "title": item.get("title", ""),
+                        "unread": item.get("unread", False),
+                        "active": item.get("active", False),
+                    }
+                    for item in targets
+                ],
+            )
 
             if not self._baseline_initialized:
-                primed = await self._prime_existing_unread_messages(targets[:5])
+                if self._should_wait_for_initial_baseline(targets):
+                    return []
+                primed = await self._prime_existing_unread_messages(targets[:5]) if targets else 0
                 self._baseline_initialized = True
                 self._consecutive_errors = 0
                 self._last_activity = time.time()
@@ -444,8 +671,39 @@ class XianyuAdapter(BaseChannelAdapter):
                 self._conversation_cache[session_id] = summary
 
                 payloads = await self._read_current_messages()
-                for payload in self._select_new_incoming_payloads(session_id, payloads):
-                    self._seen_ids.add(self._build_message_key(session_id, payload))
+                new_payloads = self._select_new_incoming_payloads(session_id, payloads)
+                if not new_payloads:
+                    logger.debug(
+                        "Xianyu session '{}' raw payloads: {}",
+                        summary.get("title", session_id),
+                        [
+                            {
+                                "text": item.get("text", "")[:50],
+                                "message_id": item.get("message_id", ""),
+                                "timestamp": item.get("timestamp", ""),
+                                "author": item.get("author", ""),
+                                "outgoing": item.get("outgoing", False),
+                                "fallback": item.get("fallback", False),
+                            }
+                            for item in payloads[-8:]
+                        ],
+                    )
+                logger.debug(
+                    "Xianyu session '{}' -> {} new payload(s): {}",
+                    summary.get("title", session_id),
+                    len(new_payloads),
+                    [
+                        {
+                            "text": item.get("text", "")[:50],
+                            "message_id": item.get("message_id", ""),
+                            "timestamp": item.get("timestamp", ""),
+                            "author": item.get("author", ""),
+                        }
+                        for item in new_payloads
+                    ],
+                )
+                for payload in new_payloads:
+                    self._seen_ids.add(payload["_message_key"])
                     messages.append(
                         IncomingMessage(
                             channel=self.channel_name,
@@ -475,6 +733,8 @@ class XianyuAdapter(BaseChannelAdapter):
         """On first poll, record current unread backlog as seen to avoid replying to stale messages."""
         primed_count = 0
         for summary in targets:
+            if self._is_non_human_conversation(summary):
+                continue
             if not await self._open_conversation(summary):
                 continue
 
@@ -485,6 +745,11 @@ class XianyuAdapter(BaseChannelAdapter):
             payloads = await self._read_current_messages()
             primed_count += self._mark_payloads_seen(session_id, payloads)
         return primed_count
+
+    def _should_wait_for_initial_baseline(self, targets: list[dict[str, Any]]) -> bool:
+        if targets:
+            return False
+        return (time.time() - self._startup_at) < BASELINE_GRACE_SECONDS
 
     # -----------------------------------------------------------------------
     # Core: send reply
@@ -574,6 +839,10 @@ class XianyuAdapter(BaseChannelAdapter):
         """Check page health; recover if needed."""
         if not self._page:
             return False
+        if self._page.is_closed():
+            logger.warning("Xianyu page was closed. Recreating page...")
+            await self._recover()
+            return False
 
         try:
             state = await self._detect_page_state()
@@ -632,6 +901,8 @@ class XianyuAdapter(BaseChannelAdapter):
         """Attempt to recover from a broken page state."""
         self._consecutive_errors = 0
         try:
+            if self._context and (not self._page or self._page.is_closed()):
+                self._page = await self._context.new_page()
             logger.info("Recovery: reloading Xianyu IM page...")
             await self._navigate_to_im()
         except Exception as exc:
@@ -670,7 +941,9 @@ class XianyuAdapter(BaseChannelAdapter):
     async def _read_current_messages(self) -> list[dict[str, Any]]:
         if not self._page:
             return []
-        return await self._page.evaluate(MESSAGE_LIST_SCRIPT)
+        await self._scroll_chat_to_bottom()
+        payloads = await self._page.evaluate(MESSAGE_LIST_SCRIPT)
+        return self._collapse_dom_duplicate_payloads(payloads)
 
     async def _open_conversation(self, summary: dict[str, Any]) -> bool:
         if not self._page:
@@ -688,12 +961,14 @@ class XianyuAdapter(BaseChannelAdapter):
                 locator = self._page.locator(selector).first
                 if await locator.count():
                     await locator.click()
+                    await self._after_open_conversation()
                     return True
 
         if title:
             title_locator = self._page.get_by_text(title, exact=False).first
             if await title_locator.count():
                 await title_locator.click()
+                await self._after_open_conversation()
                 return True
 
         preview = (summary.get("preview") or "").strip()
@@ -701,6 +976,7 @@ class XianyuAdapter(BaseChannelAdapter):
             preview_locator = self._page.get_by_text(preview, exact=False).first
             if await preview_locator.count():
                 await preview_locator.click()
+                await self._after_open_conversation()
                 return True
 
         return False
@@ -722,27 +998,97 @@ class XianyuAdapter(BaseChannelAdapter):
         return False
 
     async def _get_current_session_id(self, summary: dict[str, Any]) -> str:
+        raw_session_id = ""
         if self._page:
             url = self._page.url
             if "sessionId=" in url:
-                return url.split("sessionId=", 1)[1].split("&", 1)[0]
+                raw_session_id = url.split("sessionId=", 1)[1].split("&", 1)[0].strip()
 
-        session_id = (summary.get("session_id") or "").strip()
-        if session_id:
-            return session_id
+        if not raw_session_id:
+            raw_session_id = (summary.get("session_id") or "").strip()
 
-        base = f"{summary.get('title', '')}|{summary.get('preview', '')}"
-        digest = hashlib.sha1(base.encode("utf-8")).hexdigest()[:12]
-        return f"xianyu_{digest}"
+        return self._canonicalize_session_id(raw_session_id, summary)
 
     async def _find_input_box(self) -> Optional[Locator]:
         if not self._page:
             return None
+        await self._dismiss_restore_popup()
         for selector in TEXTAREA_SELECTORS:
+            locator = self._page.locator(selector)
+            count = await locator.count()
+            for index in range(count - 1, -1, -1):
+                candidate = locator.nth(index)
+                if await self._is_candidate_input_box(candidate):
+                    return candidate
+        return None
+
+    async def _is_candidate_input_box(self, locator: Locator) -> bool:
+        try:
+            if not await locator.is_visible():
+                return False
+            box = await locator.bounding_box()
+            if not box:
+                return False
+            viewport = self._page.viewport_size if self._page else None
+            viewport_height = (viewport or {}).get("height", 900)
+            if box["y"] < viewport_height * 0.45:
+                return False
+            disabled = await locator.get_attribute("disabled")
+            readonly = await locator.get_attribute("readonly")
+            role = await locator.get_attribute("role")
+            contenteditable = await locator.get_attribute("contenteditable")
+            if disabled is not None or readonly is not None:
+                return False
+            if role not in (None, "textbox") and contenteditable != "true":
+                return False
+            return True
+        except Exception:
+            return False
+
+    async def _after_open_conversation(self):
+        if not self._page:
+            return
+        await self._dismiss_restore_popup()
+        await self._human_delay(0.1, 0.25)
+        await self._scroll_chat_to_bottom()
+
+    async def _dismiss_restore_popup(self):
+        if not self._page:
+            return
+
+        close_candidates = [
+            "button[aria-label='Close']",
+            "button[aria-label='关闭']",
+            "[class*='modal'] [class*='close']",
+            "[class*='Modal'] [class*='close']",
+            "[class*='ant-modal'] [aria-label='Close']",
+        ]
+        for selector in close_candidates:
             locator = self._page.locator(selector).first
             if await locator.count():
-                return locator
-        return None
+                try:
+                    await locator.click(timeout=1000)
+                    return
+                except Exception:
+                    continue
+
+        close_texts = ("恢复", "关闭", "取消", "×", "✕")
+        for text in close_texts:
+            locator = self._page.get_by_text(text, exact=True).first
+            if await locator.count():
+                try:
+                    await locator.click(timeout=1000)
+                    return
+                except Exception:
+                    continue
+
+    async def _scroll_chat_to_bottom(self):
+        if not self._page:
+            return
+        try:
+            await self._page.evaluate(SCROLL_CHAT_TO_BOTTOM_SCRIPT)
+        except Exception as exc:
+            logger.debug(f"Scroll-to-bottom failed: {exc}")
 
     async def _fill_input_box_human(self, input_box: Locator, text: str):
         """Fill input with human-like typing delay."""
@@ -777,8 +1123,8 @@ class XianyuAdapter(BaseChannelAdapter):
     def _mark_payloads_seen(self, session_id: str, payloads: list[dict[str, Any]]) -> int:
         """Mark a batch of payloads as seen without replying."""
         marked = 0
-        for payload in payloads:
-            message_key = self._build_message_key(session_id, payload)
+        for payload in self._annotate_payload_keys(session_id, payloads):
+            message_key = payload["_message_key"]
             if message_key in self._seen_ids:
                 continue
             self._seen_ids.add(message_key)
@@ -789,7 +1135,11 @@ class XianyuAdapter(BaseChannelAdapter):
         self, session_id: str, conversations: list[dict[str, Any]]
     ) -> Optional[dict[str, Any]]:
         for summary in conversations:
-            if summary.get("session_id") == session_id:
+            candidate_session_id = self._canonicalize_session_id(
+                (summary.get("session_id") or "").strip(),
+                summary,
+            )
+            if candidate_session_id == session_id:
                 return summary
         cached = self._conversation_cache.get(session_id)
         if not cached:
@@ -799,19 +1149,273 @@ class XianyuAdapter(BaseChannelAdapter):
                 return summary
         return None
 
+    def _select_poll_targets(
+        self, conversations: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        targets: list[dict[str, Any]] = []
+        seen_keys: set[str] = set()
+
+        def add_target(summary: dict[str, Any]):
+            key = self._conversation_identity_key(summary)
+            if not key or key in seen_keys:
+                return
+            seen_keys.add(key)
+            targets.append(summary)
+
+        for summary in conversations:
+            if summary.get("unread"):
+                add_target(summary)
+
+        for summary in conversations:
+            if summary.get("active"):
+                add_target(summary)
+
+        if not targets and conversations:
+            add_target(conversations[0])
+
+        return targets[:5]
+
     def _select_new_incoming_payloads(
         self, session_id: str, payloads: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         new_messages = []
-        for payload in reversed(payloads):
+        annotated_payloads = self._annotate_payload_keys(session_id, payloads)
+        for payload in reversed(annotated_payloads):
             if payload.get("outgoing"):
                 continue
-            message_key = self._build_message_key(session_id, payload)
+            if self._is_non_human_message(payload):
+                continue
+            if self._is_platform_noise(payload):
+                continue
+            message_key = payload["_message_key"]
             if message_key in self._seen_ids:
                 break
             new_messages.append(payload)
         new_messages.reverse()
         return new_messages
+
+    def _annotate_payload_keys(
+        self, session_id: str, payloads: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        occurrence_counter: dict[str, int] = {}
+        annotated: list[dict[str, Any]] = []
+
+        for payload in payloads:
+            base_key = self._build_message_key(session_id, payload)
+            occurrence_index = occurrence_counter.get(base_key, 0)
+            occurrence_counter[base_key] = occurrence_index + 1
+            annotated.append(
+                {
+                    **payload,
+                    "_message_key": f"{base_key}:{occurrence_index}",
+                }
+            )
+
+        return annotated
+
+    @staticmethod
+    def _collapse_dom_duplicate_payloads(
+        payloads: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        collapsed: list[dict[str, Any]] = []
+        seen_keys: list[tuple[str, bool, int]] = []
+
+        for payload in payloads:
+            text = (payload.get("text") or "").strip()
+            if not text:
+                continue
+
+            if payload.get("message_id"):
+                collapsed.append(payload)
+                continue
+
+            top = int(payload.get("top") or 0)
+            outgoing = bool(payload.get("outgoing"))
+            duplicate = False
+            for existing_text, existing_outgoing, existing_top in seen_keys:
+                if (
+                    existing_outgoing == outgoing
+                    and existing_text == text
+                    and abs(existing_top - top) <= 14
+                ):
+                    duplicate = True
+                    break
+
+            if duplicate:
+                continue
+
+            seen_keys.append((text, outgoing, top))
+            collapsed.append(payload)
+
+        return collapsed
+
+    @staticmethod
+    def _is_platform_noise(payload: dict[str, Any]) -> bool:
+        text = (payload.get("text") or "").strip()
+        if not text:
+            return True
+
+        normalized = text.replace("\n", " ")
+        platform_noise_markers = (
+            "闲鱼币",
+            "去领取",
+            "立即领取",
+            "点击查看",
+            "点击查看>",
+            "去发布",
+            "卖得更快",
+            "热卖",
+            "加曝光机会",
+            "首页的机会",
+            "拍张照片就能卖闲置",
+            "登录奖励",
+            "0元抽",
+            "Labubu",
+            "AI翻新",
+            "本地人",
+            "优惠券",
+            "即将过期",
+            "去使用",
+            "年度账单",
+            "查看账单",
+            "立刻查看",
+            "0.01元",
+            "兑换",
+            "能量",
+            "咖啡",
+        )
+        return any(marker in normalized for marker in platform_noise_markers)
+
+    @staticmethod
+    def _is_non_human_message(payload: dict[str, Any]) -> bool:
+        text = (payload.get("text") or "").strip()
+        author = (payload.get("author") or "").strip()
+        normalized = text.replace("\n", " ")
+
+        system_message_markers = (
+            "确认收货",
+            "交易成功",
+            "完成评价",
+            "已完成互评",
+            "期待你的评价",
+            "查看评价",
+            "系统消息",
+            "官方提醒",
+            "订单确认收货奖励",
+            "握手",
+            "优惠券",
+            "年度账单",
+            "立刻查看",
+            "去使用",
+            "去兑换",
+        )
+        system_author_markers = (
+            "工作室",
+            "官方",
+            "系统",
+            "助手",
+            "客服",
+            "通知",
+        )
+
+        return any(marker in normalized for marker in system_message_markers) or any(
+            marker in author for marker in system_author_markers
+        )
+
+    @staticmethod
+    def _is_non_human_conversation(summary: dict[str, Any]) -> bool:
+        title = (summary.get("title") or "").strip()
+        preview = (summary.get("preview") or "").strip()
+        combined = f"{title}\n{preview}"
+
+        conversation_markers = (
+            "工作室",
+            "通知消息",
+            "系统消息",
+            "官方",
+            "确认收货",
+            "完成评价",
+            "查看评价",
+            "期待你的评价",
+            "交易成功",
+            "优惠券",
+            "年度账单",
+            "去兑换",
+            "去使用",
+        )
+        return any(marker in combined for marker in conversation_markers)
+
+    @staticmethod
+    def _normalize_title_key(title: str) -> str:
+        return " ".join((title or "").split()).strip().lower()
+
+    def _conversation_identity_key(self, summary: dict[str, Any]) -> str:
+        session_id = (summary.get("session_id") or "").strip()
+        if session_id:
+            return self._session_id_aliases.get(session_id, session_id)
+
+        title_key = self._normalize_title_key(summary.get("title", ""))
+        if title_key:
+            return f"title:{title_key}"
+
+        preview = " ".join((summary.get("preview") or "").split()).strip().lower()
+        return f"preview:{preview}" if preview else ""
+
+    def _canonicalize_session_id(self, raw_session_id: str, summary: dict[str, Any]) -> str:
+        title_key = self._normalize_title_key(summary.get("title", ""))
+        raw_session_id = (raw_session_id or "").strip()
+
+        if raw_session_id and raw_session_id in self._session_id_aliases:
+            canonical = self._session_id_aliases[raw_session_id]
+            if title_key:
+                self._conversation_ids_by_title.setdefault(title_key, canonical)
+            return canonical
+
+        if title_key and title_key in self._conversation_ids_by_title:
+            canonical = self._conversation_ids_by_title[title_key]
+            if raw_session_id:
+                self._session_id_aliases[raw_session_id] = canonical
+            return canonical
+
+        seed = raw_session_id or title_key or (summary.get("preview") or "").strip()
+        if not seed:
+            seed = "unknown-session"
+        canonical = raw_session_id or f"xianyu_{hashlib.sha1(seed.encode('utf-8')).hexdigest()[:12]}"
+
+        if raw_session_id:
+            self._session_id_aliases[raw_session_id] = canonical
+        if title_key:
+            self._conversation_ids_by_title[title_key] = canonical
+        return canonical
+
+    def _reply_identity(self, session_id: str) -> str:
+        cached = self._conversation_cache.get(session_id, {})
+        title_key = self._normalize_title_key(cached.get("title", ""))
+        if title_key:
+            return f"title:{title_key}"
+        return self._session_id_aliases.get(session_id, session_id)
+
+    def _should_suppress_duplicate_reply(self, session_id: str, text: str) -> bool:
+        identity = self._reply_identity(session_id)
+        if not identity:
+            return False
+
+        normalized_text = " ".join((text or "").split()).strip()
+        if not normalized_text:
+            return False
+
+        previous = self._recent_replies.get(identity)
+        if not previous:
+            return False
+
+        previous_text, sent_at = previous
+        return previous_text == normalized_text and (time.time() - sent_at) <= 20
+
+    def _record_recent_reply(self, session_id: str, text: str):
+        identity = self._reply_identity(session_id)
+        normalized_text = " ".join((text or "").split()).strip()
+        if identity and normalized_text:
+            self._recent_replies[identity] = (normalized_text, time.time())
 
     @staticmethod
     def _build_message_key(session_id: str, payload: dict[str, Any]) -> str:

@@ -1,6 +1,7 @@
 """Message deduplication to prevent double-processing."""
 
 import time
+import hashlib
 
 
 class Deduplicator:
@@ -8,8 +9,18 @@ class Deduplicator:
         self._seen: dict[str, float] = {}
         self._ttl = ttl
 
-    def is_duplicate(self, channel: str, session_id: str, content: str) -> bool:
-        key = f"{channel}:{session_id}:{hash(content)}"
+    def is_duplicate(
+        self,
+        channel: str,
+        session_id: str,
+        content: str,
+        message_id: str = "",
+        timestamp: str = "",
+        author: str = "",
+    ) -> bool:
+        basis = message_id.strip() or f"{author.strip()}|{timestamp.strip()}|{content.strip()}"
+        digest = hashlib.sha1(basis.encode("utf-8")).hexdigest()
+        key = f"{channel}:{session_id}:{digest}"
         now = time.time()
         # Clean expired
         self._seen = {k: v for k, v in self._seen.items() if now - v < self._ttl}

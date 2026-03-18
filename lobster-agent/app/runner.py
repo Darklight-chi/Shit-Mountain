@@ -59,7 +59,7 @@ MODE_CONFIG: dict[str, dict] = {
     "xianyu": {
         "factory": XianyuAdapter,
         "poll_interval": XIANYU_POLL_INTERVAL,
-        "reply_delay": (1.0, 3.0),
+        "reply_delay": None,
     },
     "ozon": {
         "factory": OzonAdapter,
@@ -182,7 +182,7 @@ async def run_live_loop(mode: str):
 
             sleep_for = poll_interval
             if mode == "xianyu":
-                sleep_for = max(2, poll_interval + random.uniform(-1.0, 2.0))
+                sleep_for = max(1, poll_interval + random.uniform(0.0, 0.2))
             await asyncio.sleep(sleep_for)
     except KeyboardInterrupt:
         logger.info(f"Shutting down {mode} loop...")

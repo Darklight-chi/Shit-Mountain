@@ -1,11 +1,16 @@
 """Operational flow tests for Xianyu / Ozon."""
 
+import asyncio
 import sys
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from adapters.base import IncomingMessage
 from agent.graph import run_agent
+from app.runner import process_incoming_message
+from conversation.message_router import MessageRouter
 from conversation.escalation import EscalationManager
 from conversation.session_manager import SessionManager
 from database.db import init_db
@@ -80,6 +85,27 @@ def test_existing_handoff_session_does_not_create_new_flow():
     assert "人工" in result["reply"]
 
 
+def test_existing_handoff_session_can_resume_tracking_lookup():
+    init_db()
+    result = run_agent(
+        {
+            "message": "tracking A10239",
+            "history": [
+                {"role": "user", "content": "please ship soon"},
+                {"role": "assistant", "content": "manual handoff in progress"},
+            ],
+            "user_id": "demo_user",
+            "channel": "xianyu",
+            "session": {"id": 5, "last_intent": "shipping_time", "needs_handoff": True},
+        }
+    )
+    assert result["intent"] == "tracking_status"
+    assert result["needs_handoff"] is False
+    assert "人工" not in result["reply"]
+    assert "Carrier:" in result["reply"]
+    assert "ETA:" in result["reply"]
+
+
 def test_handoff_accept_and_resolve_flow():
     init_db()
     session_mgr = SessionManager()
@@ -105,6 +131,98 @@ def test_handoff_accept_and_resolve_flow():
     assert resolved["ticket"]["status"] == "resolved"
     assert resolved["session"]["status"] == "resolved"
     assert resolved["session"]["needs_handoff"] is False
+
+
+def test_existing_handoff_session_can_resend_same_reply():
+    init_db()
+    router = MessageRouter()
+    session_mgr = router.session_mgr
+    session_id = f"handoff-resend-demo-{uuid.uuid4().hex[:8]}"
+    handoff_text = "您的问题已记录，我现在为您转接人工客服，请稍等。"
+
+    session_mgr.ensure_session("xianyu", session_id, "demo_user")
+    session_mgr.save_message("xianyu", session_id, "demo_user", "assistant", handoff_text)
+    session_mgr.update_session(
+        session_id,
+        status="escalated",
+        last_intent="complaint",
+        last_risk_level="high",
+        needs_handoff=True,
+        summary="channel=xianyu | handoff=yes",
+    )
+
+    result = asyncio.run(
+        process_incoming_message(
+            IncomingMessage(
+                channel="xianyu",
+                session_id=session_id,
+                user_id="demo_user",
+                content="还在吗",
+            ),
+            router=router,
+        )
+    )
+
+    history = session_mgr.get_history(session_id)
+    assistant_replies = [item for item in history if item.get("role") == "assistant"]
+    assert result is not None
+    assert len(assistant_replies) == 2
+    assert assistant_replies[0]["content"] == handoff_text
+    assert assistant_replies[-1]["content"] == handoff_text
+
+
+def test_xianyu_price_question_uses_human_presale_reply():
+    init_db()
+    result = run_agent(
+        {
+            "message": "凤阁九霄 这个商品可以价格低一点吗",
+            "history": [],
+            "user_id": "demo_user",
+            "channel": "xianyu",
+            "channel_context": {"conversation_title": "凤阁九霄"},
+            "session": {"id": 5, "last_intent": "general_greeting", "needs_handoff": False},
+        }
+    )
+    assert result["intent"] == "presale_product"
+    assert "知识库" not in result["reply"]
+    assert "价格" in result["reply"] or "实在" in result["reply"] or "空间" in result["reply"]
+
+
+def test_duplicate_outbound_reply_is_saved_to_history():
+    init_db()
+    router = MessageRouter()
+    session_mgr = router.session_mgr
+    session_id = f"ozon-dup-guard-{uuid.uuid4().hex[:8]}"
+
+    class FakeAdapter:
+        last_send_suppressed = False
+
+        async def get_session_context(self, _session_id: str) -> dict:
+            return {"channel": "ozon", "session_id": _session_id}
+
+        async def send_reply(self, _session_id: str, _text: str) -> bool:
+            self.last_send_suppressed = True
+            return True
+
+    session_mgr.ensure_session("ozon", session_id, "demo_user")
+
+    result = asyncio.run(
+        process_incoming_message(
+            IncomingMessage(
+                channel="ozon",
+                session_id=session_id,
+                user_id="demo_user",
+                content="hello",
+            ),
+            router=router,
+            adapter=FakeAdapter(),
+        )
+    )
+
+    history = session_mgr.get_history(session_id)
+    assistant_replies = [item for item in history if item.get("role") == "assistant"]
+    assert result is not None
+    assert len(assistant_replies) == 1
 
 
 if __name__ == "__main__":
